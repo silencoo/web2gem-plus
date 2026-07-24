@@ -1,0 +1,335 @@
+name: Release web2gem-plus Edition
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version bump type"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: plus-versioned-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.next_version.outputs.new_version }}
+      new_tag: ${{ steps.next_version.outputs.new_tag }}
+      revision_sha: ${{ steps.revision.outputs.sha }}
+    env:
+      NODE_VERSION: "26"
+      PNPM_VERSION: "11.10.0"
+      EDITION: plus
+      SOURCE_BRANCH: main
+      TAG_PREFIX: plus-v
+      ASSET_PREFIX: web2gem-plus-main
+      IMAGE_REPOSITORY: web2gem-plus
+    steps:
+      - name: Validate release source
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${RELEASE_REF}" != "refs/heads/main" ]; then
+            echo "Plus-edition releases must be dispatched from main; got ${RELEASE_REF}." >&2
+            exit 1
+          fi
+
+      - name: Checkout release branch
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Get current version
+        id: get_version
+        run: |
+          set -euo pipefail
+          LATEST_TAG="$(git tag --list "${TAG_PREFIX}[0-9]*" --sort=-v:refname | head -n 1)"
+          TAG_VERSION="0.0.0"
+          if [ -n "${LATEST_TAG}" ]; then
+            TAG_VERSION="${LATEST_TAG:${#TAG_PREFIX}}"
+          fi
+          FILE_VERSION="$(node -p "require('./package.json').version")"
+
+          VERSION="$(printf '%s\n' "${TAG_VERSION}" "${FILE_VERSION}" | sort -V | tail -n 1)"
+          echo "Current ${EDITION:-release} version: ${VERSION}"
+          echo "current_version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Calculate next version
+        id: next_version
+        env:
+          VERSION_TYPE: ${{ inputs.version_type }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.get_version.outputs.current_version }}"
+          BASE_VERSION="$(echo "${VERSION}" | sed 's/-.*$//')"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${BASE_VERSION}"
+          MAJOR="${MAJOR:-0}"
+          MINOR="${MINOR:-0}"
+          PATCH="${PATCH:-0}"
+
+          case "${VERSION_TYPE}" in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+            *)
+              echo "Unsupported version type: ${VERSION_TYPE}" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "New version: ${NEW_VERSION}"
+          echo "new_version=${NEW_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "new_tag=${TAG_PREFIX}${NEW_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release tag is available
+        run: |
+          set -euo pipefail
+          NEW_TAG="${{ steps.next_version.outputs.new_tag }}"
+          if git rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
+            echo "Tag ${NEW_TAG} already exists." >&2
+            exit 1
+          fi
+
+      - name: Update package and Worker versions
+        run: |
+          pnpm version ${{ steps.next_version.outputs.new_version }} --no-git-tag-version
+          node -e 'const fs=require("node:fs");const version=require("./package.json").version;const path="src/config/index.ts";const source=fs.readFileSync(path,"utf8");const next=source.replace(/export const VERSION = "[^"]+";/, `export const VERSION = "${version}-worker";`);if(next===source)throw new Error("Worker VERSION was not updated");fs.writeFileSync(path,next);'
+
+      - name: Release Blocking Gates
+        run: |
+          pnpm check:release
+          pnpm docker:smoke
+
+      - name: Commit package version and create tag
+        env:
+          NEW_TAG: ${{ steps.next_version.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add package.json pnpm-lock.yaml src/config/index.ts
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): bump ${EDITION} to ${NEW_TAG} [skip ci]"
+          fi
+
+          git tag -a "${NEW_TAG}" -m "Release ${EDITION} ${NEW_TAG}"
+          git push --atomic origin "HEAD:${SOURCE_BRANCH}" "refs/tags/${NEW_TAG}"
+
+      - name: Capture release revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    concurrency:
+      group: plus-release-artifacts-${{ needs.prepare.outputs.new_tag }}
+      cancel-in-progress: false
+    env:
+      NODE_VERSION: "26"
+      PNPM_VERSION: "11.10.0"
+      EDITION: plus
+      TAG_PREFIX: plus-v
+      ASSET_PREFIX: web2gem-plus-main
+      IMAGE_REPOSITORY: web2gem-plus
+      RELEASE_TAG: ${{ needs.prepare.outputs.new_tag }}
+      RELEASE_REVISION: ${{ needs.prepare.outputs.revision_sha }}
+      RELEASE_CACHE_SCOPE: plus-release-image
+    steps:
+      - name: Validate release metadata
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_TAG}" != "${TAG_PREFIX}"* ]]; then
+            echo "Release tag ${RELEASE_TAG} does not use prefix ${TAG_PREFIX}." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release revision must be a full commit SHA." >&2
+            exit 1
+          fi
+
+      - name: Checkout release revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${RELEASE_REVISION}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Worker Artifact
+        run: pnpm build
+
+      - name: Prepare Release Assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp dist/worker.js "release-assets/${ASSET_PREFIX}-worker.js"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Wait for GHCR endpoint
+        run: |
+          set -euo pipefail
+          for i in {1..6}; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 https://ghcr.io/v2/ || true)"
+            if [ "${code}" = "200" ] || [ "${code}" = "401" ] || [ "${code}" = "405" ]; then
+              exit 0
+            fi
+            sleep "$((i * 10))"
+          done
+          echo "GHCR endpoint is unreachable after multiple retries (last status: ${code:-unknown})." >&2
+          exit 1
+
+      - name: Validate and collect image tags
+        id: image_tags
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG:${#TAG_PREFIX}}"
+          ghcr_owner="${GITHUB_REPOSITORY_OWNER,,}"
+          ghcr_image="ghcr.io/${ghcr_owner}/${IMAGE_REPOSITORY}"
+          tags=(
+            "${ghcr_image}:${RELEASE_TAG}"
+            "${ghcr_image}:${version}"
+            "${ghcr_image}:latest"
+          )
+
+          {
+            echo "version=${version}"
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.image_tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.image_tags.outputs.version }}
+            org.opencontainers.image.revision=${{ env.RELEASE_REVISION }}
+          cache-from: type=gha,scope=${{ env.RELEASE_CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.RELEASE_CACHE_SCOPE }}
+
+      - name: Export Docker image archives for release assets
+        run: |
+          set -euo pipefail
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "${IMAGE_REPOSITORY}:${RELEASE_TAG}" \
+            --tag "${IMAGE_REPOSITORY}:latest" \
+            --label "org.opencontainers.image.version=${{ steps.image_tags.outputs.version }}" \
+            --label "org.opencontainers.image.revision=${RELEASE_REVISION}" \
+            --cache-from "type=gha,scope=${RELEASE_CACHE_SCOPE}" \
+            --output "type=docker,dest=release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_amd64.tar" \
+            .
+
+          docker buildx build \
+            --platform linux/arm64 \
+            --tag "${IMAGE_REPOSITORY}:${RELEASE_TAG}" \
+            --tag "${IMAGE_REPOSITORY}:latest" \
+            --label "org.opencontainers.image.version=${{ steps.image_tags.outputs.version }}" \
+            --label "org.opencontainers.image.revision=${RELEASE_REVISION}" \
+            --cache-from "type=gha,scope=${RELEASE_CACHE_SCOPE}" \
+            --output "type=docker,dest=release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_arm64.tar" \
+            .
+
+          gzip -f "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_amd64.tar"
+          gzip -f "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_arm64.tar"
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          (cd release-assets && sha256sum "${ASSET_PREFIX}-worker.js" *.tar.gz > sha256sums.txt)
+
+      - name: Validate release assets
+        run: |
+          set -euo pipefail
+          test -s "release-assets/${ASSET_PREFIX}-worker.js"
+          test -s "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_amd64.tar.gz"
+          test -s "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_arm64.tar.gz"
+          test -s release-assets/sha256sums.txt
+
+      - name: Upload Release Assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          FILES=(
+            "release-assets/${ASSET_PREFIX}-worker.js"
+            "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_amd64.tar.gz"
+            "release-assets/${ASSET_PREFIX}_${RELEASE_TAG}_docker_linux_arm64.tar.gz"
+            release-assets/sha256sums.txt
+          )
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${FILES[@]}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${FILES[@]}" --title "web2gem-plus ${EDITION} ${RELEASE_TAG}" --notes ""
+          fi
