@@ -1498,7 +1498,46 @@ export const cases = [
 				{ url: "https://images.example/generated.png" },
 			]);
 			assert.equal(String(body.data[0].url).startsWith("/images/"), false);
-			assert.deepEqual(generateOptions, { hydrateGeneratedImageBytes: false });
+			assert.deepEqual(generateOptions, {
+				hydrateGeneratedImageBytes: false,
+				removeWatermark: true,
+			});
+		},
+	],
+	[
+		"forwards remove_watermark=false on OpenAI Images generations",
+		async () => {
+			let generateOptions = null;
+			const resp = await mod.handleImageGenerations(
+				{
+					model: "gemini-3.5-flash",
+					prompt: "draw a cat",
+					response_format: "b64_json",
+					remove_watermark: false,
+				},
+				baseConfig({ cookie: "SID=ok" }),
+				fakeProvider({
+					async generateRich(_input, options) {
+						generateOptions = options;
+						return {
+							text: "",
+							images: [
+								{
+									url: "https://images.example/generated.png",
+									source: "generated",
+									base64: TINY_PNG_BASE64,
+									outputFormat: "png",
+								},
+							],
+						};
+					},
+				}),
+			);
+			assert.equal(resp.status, 200);
+			assert.deepEqual(generateOptions, {
+				hydrateGeneratedImageBytes: true,
+				removeWatermark: false,
+			});
 		},
 	],
 	[

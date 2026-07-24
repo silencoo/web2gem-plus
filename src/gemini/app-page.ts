@@ -1,4 +1,9 @@
-export type GeminiAppPageTokens = { push_id?: string; at?: string };
+export type GeminiAppPageTokens = {
+	push_id?: string;
+	at?: string;
+	/** Gemini `FdrFJe` session id used by batchexecute (`f.sid`). */
+	sid?: string;
+};
 
 type TextStreamResponse = {
 	body?: ReadableStream<Uint8Array> | null;
@@ -9,6 +14,7 @@ type QuotedMarkerSpec<K extends string> = { key: K; marker: string };
 const APP_PAGE_TOKEN_MARKERS: QuotedMarkerSpec<keyof GeminiAppPageTokens>[] = [
 	{ key: "push_id", marker: '"qKIAYe":"' },
 	{ key: "at", marker: '"SNlM0e":"' },
+	{ key: "sid", marker: '"FdrFJe":"' },
 ];
 const PUSH_ID_MARKER: QuotedMarkerSpec<"push_id"> = {
 	key: "push_id",

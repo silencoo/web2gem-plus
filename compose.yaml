@@ -1,6 +1,6 @@
 services:
-  web2gem:
-    image: "${WEB2GEM_IMAGE:-ghcr.io/guardinary/web2gem:latest}"
+  web2gem-plus:
+    image: "${WEB2GEM_PLUS_IMAGE:-ghcr.io/silencoo/web2gem-plus:latest}"
     pull_policy: always
     restart: unless-stopped
     ports:

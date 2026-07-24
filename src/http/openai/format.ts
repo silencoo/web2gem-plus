@@ -184,14 +184,18 @@ export function buildOpenAIImagesResponse(
 	options: { created: number; responseFormat: OpenAIImagesResponseFormat },
 ): Record<string, unknown> {
 	const data: Record<string, string>[] = [];
+	const hydrateDebug: string[] = [];
 	for (const image of images) {
+		if (image.hydrateDebug) hydrateDebug.push(image.hydrateDebug);
 		if (options.responseFormat === "b64_json") {
 			if (image.base64) data.push({ b64_json: image.base64 });
 			continue;
 		}
 		if (image.url) data.push({ url: image.url });
 	}
-	return { created: options.created, data };
+	const out: Record<string, unknown> = { created: options.created, data };
+	if (hydrateDebug.length) out.web2gem_plus_hydrate_debug = hydrateDebug;
+	return out;
 }
 
 function hasImageCallBytes(image: GeneratedImage): boolean {

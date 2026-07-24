@@ -54,6 +54,8 @@ type GeminiStreamOptions = {
 
 type GeminiRichOptions = {
 	hydrateGeneratedImageBytes?: boolean;
+	/** When false, skip Gemini watermark scrub (default true). */
+	removeWatermark?: boolean;
 };
 
 export type { GeminiRichImage } from "./generated-images";
@@ -284,7 +286,15 @@ export async function generateRich(
 			const images =
 				options.hydrateGeneratedImageBytes === false
 					? parts.images
-					: await hydrateGeneratedImages(cfg, activeCfg, parts.images);
+					: await hydrateGeneratedImages(
+							cfg,
+							activeCfg,
+							parts.images,
+							undefined,
+							{
+								removeWatermark: options.removeWatermark,
+							},
+						);
 			return { text: parts.text, images };
 		} catch (e) {
 			if (isInvalidGeminiCookieError(e) && !refreshedCookie) {

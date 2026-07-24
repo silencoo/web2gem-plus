@@ -48,6 +48,14 @@ export const MODELS: Record<string, ModelConfig> = {
 		modelHeaders: webModelHeaders("fbb127bbb056c959", 1),
 		desc: "Fast general-purpose model",
 	},
+	"gemini-3.6-flash": {
+		mode: 1,
+		think: 4,
+		// Gemini Web "Flash" / "3.6 Flash" (Flash3p6PaidV2Rollout) → 56fdd199312815e2
+		// capacity tail 2 matches the account model catalog entry for paid Flash 3.6.
+		modelHeaders: webModelHeaders("56fdd199312815e2", 2),
+		desc: "Gemini 3.6 Flash — agentic / coding oriented fast model",
+	},
 	"gemini-3.5-flash-thinking": {
 		mode: 2,
 		think: 0,

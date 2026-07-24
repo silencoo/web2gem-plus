@@ -93,7 +93,7 @@ function shouldRefreshPushIdAfterStatus(status: unknown): boolean {
 export function buildMultipartFileBody(
 	input: UploadBytesInput,
 ): MultipartFileBody {
-	const boundary = `----web2gem-${randomBoundarySuffix()}`;
+	const boundary = `----web2gem-plus-${randomBoundarySuffix()}`;
 	const filename = escapeMultipartFilename(input.filename || "upload.bin");
 	const mime =
 		String(input.mime || "application/octet-stream")

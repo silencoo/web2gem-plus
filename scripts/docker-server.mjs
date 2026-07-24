@@ -116,7 +116,7 @@ export function startDockerServer(options = {}) {
 	const listenPort = Number(options.port || port);
 	const listenHost = options.host || host;
 	server.listen(listenPort, listenHost, () => {
-		console.log(`web2gem listening on http://${listenHost}:${listenPort}`);
+		console.log(`web2gem-plus listening on http://${listenHost}:${listenPort}`);
 	});
 	return server;
 }

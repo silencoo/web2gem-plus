@@ -19,6 +19,7 @@ export type GeneratedImage = {
 	rcid?: string;
 	base64?: string;
 	outputFormat?: "png" | "jpeg" | "gif" | "webp";
+	hydrateDebug?: string;
 };
 
 export type CompletionRichOutput = {
@@ -32,6 +33,8 @@ export type CompletionProviderOptions = {
 
 export type CompletionRichOptions = {
 	hydrateGeneratedImageBytes?: boolean;
+	/** When false, skip Gemini watermark scrub on hydrated image bytes (default true). */
+	removeWatermark?: boolean;
 };
 
 export type CompletionProvider = {

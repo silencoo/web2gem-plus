@@ -143,7 +143,7 @@ export const cases = [
 				},
 			);
 			assert.equal(logs.length, 3);
-			assert.match(logs[0], /\[web2gem\] \{"ok":true\}/);
+			assert.match(logs[0], /\[web2gem-plus\] \{"ok":true\}/);
 			assert.match(logs[1], /\[object Object\]/);
 			assert.match(logs[2], /stage=upload/);
 			assert.match(logs[2], /n=0/);
@@ -976,11 +976,11 @@ export const cases = [
 				code: "internal_server_error",
 			});
 			assert.equal(logs.length, 2);
-			assert.match(logs[0], /^\[web2gem\] error: type=URIError$/);
+			assert.match(logs[0], /^\[web2gem-plus\] error: type=URIError$/);
 			assert.doesNotMatch(logs[0], /URI malformed|at /);
 			assert.match(
 				logs[1],
-				/^\[web2gem\] stage=request_complete requestId=.+ method=GET path=\/v1\/models\/%E0%A4%A status=500 ms=/,
+				/^\[web2gem-plus\] stage=request_complete requestId=.+ method=GET path=\/v1\/models\/%E0%A4%A status=500 ms=/,
 			);
 		},
 	],

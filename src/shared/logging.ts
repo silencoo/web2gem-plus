@@ -17,7 +17,7 @@ function writeLog(msg: unknown): void {
 		const consoleValue = Reflect.get(globalThis, "console") as
 			| { log?: (message: unknown) => void }
 			| undefined;
-		consoleValue?.log?.(`[web2gem] ${formatLogMessage(msg)}`);
+		consoleValue?.log?.(`[web2gem-plus] ${formatLogMessage(msg)}`);
 	} catch (_) {}
 }
 

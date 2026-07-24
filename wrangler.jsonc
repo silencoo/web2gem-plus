@@ -1,6 +1,6 @@
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
-	"name": "web2gem",
+	"name": "web2gem-plus",
 	"main": "dist/worker.js",
 	"compatibility_date": "2026-07-08",
 	"compatibility_flags": ["nodejs_compat"],

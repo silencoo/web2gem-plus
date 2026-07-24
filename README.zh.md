@@ -1,6 +1,8 @@
-# web2gem
+# web2gem-plus
 
 [English](README.md) | [简体中文](README.zh.md)
+
+> **Fork 声明。** `web2gem-plus` 是 [`Guardinary/web2gem`](https://github.com/Guardinary/web2gem) 的社区维护 fork。它完整保留上游 API 表面，并叠加定向增强（最显著的是可选的 Gemini 水印去除流水线）。原始架构的全部功劳归属上游项目。
 
 轻量级 Gemini Web API 网关，兼容 OpenAI 和 Google Gemini 接口。可以将单文件 Worker 部署到 Cloudflare，也可以使用 Docker 自托管，并按需启用 API 鉴权和基于 Gemini cookie 的功能。
 
@@ -10,7 +12,7 @@
 
 ## 目录
 
-- [web2gem](#web2gem)
+- [web2gem-plus](#web2gem-plus)
   - [目录](#目录)
   - [概览](#概览)
   - [选择版本](#选择版本)
@@ -38,7 +40,7 @@
 
 ## 概览
 
-`web2gem` 让 OpenAI 兼容客户端和 Google Gemini 兼容客户端通过熟悉的 HTTP API 使用 Gemini Web。`main` 版本刻意保持简单：没有账号数据库和管理页面；需要 Gemini 认证能力时，通过一个运行时 `GEMINI_COOKIE` 提供凭据，并在可能时只在内存中刷新。
+`web2gem-plus` 让 OpenAI 兼容客户端和 Google Gemini 兼容客户端通过熟悉的 HTTP API 使用 Gemini Web。`main` 版本刻意保持简单：没有账号数据库和管理页面；需要 Gemini 认证能力时，通过一个运行时 `GEMINI_COOKIE` 提供凭据，并在可能时只在内存中刷新。
 
 它适合个人部署、简单代理，以及希望保持无状态小型运行时的用户。Cloudflare Workers 可以在普通 `fetch` 路径受限时使用 `cloudflare:sockets`；Docker 默认使用标准 `fetch`。
 
@@ -78,6 +80,7 @@
 | 结构化输出                 | 对非流式结构化响应执行最终 JSON 校验和规范化；默认拒绝流式结构化输出。                                                                            |
 | 大上下文处理               | 配置 `GEMINI_COOKIE` 后，可将大段提示上下文作为 Gemini 文本附件上传，而不是全部以内联文本发送。                                                    |
 | 生图                       | 支持非流式 Chat/Responses 请求中的显式 OpenAI `image_generation` 元数据，以及 `/v1/images/generations`、`/v1/images/edits`；需要配置 Gemini cookie。 |
+| 自动去水印                 | 可选。基于 [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) 反向 Alpha 混合，在网页全尺寸下载链路之后只处理右下角裁剪区域。Cloudflare Workers 上对 ~2K+ 整图全幅扫描常会触发 CPU 超限（Error 1102）。只要分辨率时可设 `"remove_watermark": false`，或用 GargantuaX / 浏览器扩展离线去水印。默认仍为 `true`，对较小预览级图片更合适。 |
 | 图片输入处理               | 通过 Gemini provider 路径解析用户提供的内联/base64 图片；Worker 不抓取远程图片或文件 URL。                                                        |
 | 通用文件附件               | 配置 Gemini cookie 后，请求内 `input_file` 和非图片内联数据可使用 Gemini Web 上传引用，支持任意文件名和 MIME；不实现持久化 `/v1/files` 服务。     |
 | Worker 和 Docker 部署      | 可将 Worker bundle 部署到 Cloudflare Workers，也可用 Docker / Docker Compose 自托管；`main` 的两种模式都不需要账号数据库。                        |
@@ -103,7 +106,7 @@ Gemini Web 属于可能随时变化的上游 Web 协议，本项目更适合个�
 ### 健康检查
 
 ```sh
-curl https://your-web2gem.example/
+curl https://your-web2gem-plus.example/
 ```
 
 返回服务状态、版本号，以及当前适配器暴露的模型 ID。
@@ -111,7 +114,7 @@ curl https://your-web2gem.example/
 ### OpenAI Chat Completions
 
 ```sh
-curl https://your-web2gem.example/v1/chat/completions \
+curl https://your-web2gem-plus.example/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -127,7 +130,7 @@ curl https://your-web2gem.example/v1/chat/completions \
 生图请求必须使用显式 OpenAI image-generation 元数据。`tool_choice: { "type": "image_generation" }` 或 `tools[]` 中的 `{ "type": "image_generation" }` 会进入 pass-through 生图路径。该模式只使用用户编写的提示词文本和用户提供的内联/已有图片输入；仅有附件没有提示词会被拒绝。Chat Completions 会以 data-image 或 URL markdown 透传上游文本/图片。Worker 不抓取远程图片或文件 URL。生图、图像编辑和图片字节获取都需要配置 `GEMINI_COOKIE`。
 
 ```sh
-curl https://your-web2gem.example/v1/chat/completions \
+curl https://your-web2gem-plus.example/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -140,7 +143,7 @@ curl https://your-web2gem.example/v1/chat/completions \
 ### OpenAI Responses
 
 ```sh
-curl https://your-web2gem.example/v1/responses \
+curl https://your-web2gem-plus.example/v1/responses \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -156,7 +159,7 @@ Responses 生图使用相同的显式元数据；当图片字节可用时，会�
 `POST /v1/images/generations` 和 `POST /v1/images/edits` 作为非流式生图路由提供兼容。它们不需要 `tools` 或 `tool_choice`，但仍然需要配置 `GEMINI_COOKIE`。
 
 ```sh
-curl https://your-web2gem.example/v1/images/generations \
+curl https://your-web2gem-plus.example/v1/images/generations \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -168,10 +171,30 @@ curl https://your-web2gem.example/v1/images/generations \
 
 图片编辑需要同时提供 `prompt` 和至少一个本地图片输入。JSON 和 multipart 编辑输入可使用 `image`、`images`、`image_url` 或 `input_image`，图片内容必须是内联 base64/data URL 字节。远程 `http://` / `https://` 图片 URL 会被拒绝，Worker 不会抓取。图片端点只支持 `n: 1`，`response_format` 默认是 `b64_json`，也接受 `response_format: "url"` 以返回 provider URL，并且拒绝 `stream: true`。
 
+可选图片字段：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `remove_watermark` | `true` | 为 `true` 时在 hydration 后去除角标水印；为 `false` 时原样返回全尺寸下载字节（保留水印）。Chat / Responses 生图与 multipart 编辑同样支持。 |
+
+Hydration 优先走 Gemini 网页全尺寸下载链（`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`），才能拿到多 MB 的约 2K 资源。去水印是另一步 CPU 密集处理：早期「小图去水印效果怪」往往是因为只拿到了 **CDN 预览**（约 1MP），而不是去水印算法本身坏了。Workers 上大图建议 `"remove_watermark": false`，需要时用 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) 本地处理。Paid 计划可把 `limits.cpu_ms` 提到最高 5 分钟，以便在 Worker 内处理更大图。
+
+```sh
+curl https://your-web2gem-plus.example/v1/images/generations \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.5-flash",
+    "prompt": "生成一张风景照片。",
+    "response_format": "b64_json",
+    "remove_watermark": false
+  }'
+```
+
 ### Google Gemini API
 
 ```sh
-curl https://your-web2gem.example/v1beta/models/gemini-3.5-flash:generateContent \
+curl https://your-web2gem-plus.example/v1beta/models/gemini-3.5-flash:generateContent \
   -H "x-api-key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -188,11 +211,12 @@ curl https://your-web2gem.example/v1beta/models/gemini-3.5-flash:generateContent
 
 ## 模型
 
-`web2gem` 在 `src/models/index.ts` 中暴露固定模型映射。
+`web2gem-plus` 在 `src/models/index.ts` 中暴露固定模型映射。
 
 | 模型 ID                          | 说明                                       |
 | -------------------------------- | ------------------------------------------ |
 | `gemini-3.5-flash`               | 快速通用模型。                             |
+| `gemini-3.6-flash`               | Gemini 3.6 Flash，偏 agentic / 编程的 Fast 模型。 |
 | `gemini-3.5-flash-thinking`      | 深度思考模式，输出更长。                   |
 | `gemini-3.1-pro`                 | Pro 路由；真实路由需要有效 Gemini cookie。 |
 | `gemini-3.1-pro-enhanced`        | 实验性的增强 Pro 输出模式。                |
@@ -208,7 +232,7 @@ curl https://your-web2gem.example/v1beta/models/gemini-3.5-flash:generateContent
 
 ### 方式一：通过 Release 单文件 Worker 产物部署
 
-从项目 [Releases](https://github.com/Guardinary/web2gem/releases) 页面下载主版本产物 `web2gem-main-worker.js`，在 Cloudflare Worker 控制台打开你的 Worker，将 Worker 源码替换为该文件内容。然后在 Worker 控制台设置中添加 `nodejs_compat` 兼容性标记。
+从项目 [Releases](https://github.com/silencoo/web2gem-plus/releases) 页面下载主版本产物 `web2gem-plus-main-worker.js`，在 Cloudflare Worker 控制台打开你的 Worker，将 Worker 源码替换为该文件内容。然后在 Worker 控制台设置中添加 `nodejs_compat` 兼容性标记。
 
 ![Cloudflare Worker 设置中的 nodejs_compat 兼容性标记](./docs/images/cloudflare-worker-settings-nodejs-compat.png)
 
@@ -216,9 +240,9 @@ curl https://your-web2gem.example/v1beta/models/gemini-3.5-flash:generateContent
 
 | 文件 | 用途 |
 |------|------|
-| `web2gem-main-worker.js` | 主版本单文件 Cloudflare Worker bundle。 |
-| `web2gem-main_<tag>_docker_linux_amd64.tar.gz` | 主版本 `linux/amd64` Docker 镜像归档。 |
-| `web2gem-main_<tag>_docker_linux_arm64.tar.gz` | 主版本 `linux/arm64` Docker 镜像归档。 |
+| `web2gem-plus-main-worker.js` | 主版本单文件 Cloudflare Worker bundle。 |
+| `web2gem-plus-main_<tag>_docker_linux_amd64.tar.gz` | 主版本 `linux/amd64` Docker 镜像归档。 |
+| `web2gem-plus-main_<tag>_docker_linux_arm64.tar.gz` | 主版本 `linux/arm64` Docker 镜像归档。 |
 | `sha256sums.txt` | 发布文件校验和。 |
 
 Secrets 是可选项。在 Worker 控制台中打开该 Worker 的设置页，只为需要的功能添加变量或 Secrets。需要保护共享访问时设置 `API_KEYS`；需要 Pro 路由、大上下文文本附件或已登录 Gemini Web 行为时设置 `GEMINI_COOKIE`。
@@ -238,7 +262,7 @@ docker compose up -d
 
 在 PowerShell 中，请使用 `Copy-Item .env.example .env` 代替 `cp`。
 
-仓库提供的 [`compose.yaml`](compose.yaml) 默认拉取 `ghcr.io/guardinary/web2gem:latest`，映射 `${PORT:-52389}:${PORT:-52389}`，并从 `.env` 传入运行时变量。共享部署时设置 `API_KEYS`；需要 Pro 路由、生图/图片编辑、大上下文文本附件或其他已登录 Gemini Web 行为时设置 `GEMINI_COOKIE`。如需固定镜像版本，可设置 `WEB2GEM_IMAGE=ghcr.io/guardinary/web2gem:<tag>`。
+仓库提供的 [`compose.yaml`](compose.yaml) 默认拉取 `ghcr.io/silencoo/web2gem-plus:latest`，映射 `${PORT:-52389}:${PORT:-52389}`，并从 `.env` 传入运行时变量。共享部署时设置 `API_KEYS`；需要 Pro 路由、生图/图片编辑、大上下文文本附件或其他已登录 Gemini Web 行为时设置 `GEMINI_COOKIE`。如需固定镜像版本，可设置 `WEB2GEM_PLUS_IMAGE=ghcr.io/silencoo/web2gem-plus:<tag>`。
 
 容器启动后，可验证本地健康检查路由：
 
@@ -251,15 +275,15 @@ curl http://127.0.0.1:52389/
 如果只是临时本地测试，也可以不用 Compose，直接构建并运行镜像：
 
 ```sh
-docker build -t web2gem .
-docker run --rm -p 52389:52389 --env-file .env web2gem
+docker build -t web2gem-plus .
+docker run --rm -p 52389:52389 --env-file .env web2gem-plus
 ```
 
 Release 页面也提供预构建 Docker 镜像归档。下载与你的平台匹配的归档，加载后运行对应 tag：
 
 ```sh
-gzip -dc web2gem-main_<tag>_docker_linux_amd64.tar.gz | docker load
-docker run --rm -p 52389:52389 --env-file .env web2gem:<tag>
+gzip -dc web2gem-plus-main_<tag>_docker_linux_amd64.tar.gz | docker load
+docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 ```
 
 如果上游 Gemini Web 路径开始返回空输出，先检查 `GEMINI_BL` 是否需要从当前 Gemini Web 前端刷新。如果 Cloudflare 出口请求被限流，可以把 `GEMINI_ORIGIN` 设置成你自己的转发服务或代理地址。
@@ -318,7 +342,7 @@ wrangler secret put GEMINI_COOKIE
 
 当 `API_KEYS` 为空时，除 Cloudflare/Wrangler 基础设施外，所有路由都可被公开调用。任何共享部署都应至少设置一个 API key。
 
-`web2gem` 接受以下形式：
+`web2gem-plus` 接受以下形式：
 
 - `Authorization: Bearer <key>`
 - `x-api-key: <key>`
@@ -419,7 +443,11 @@ pnpm docker:smoke
 
 ## 致谢
 
+本项目 fork 自 [Guardinary/web2gem](https://github.com/Guardinary/web2gem)。所有上游行为与架构都来自该项目；本 fork 在其上加入定向增强（最显著的是可选的水印去除流水线）。
+
 [![LinuxDo](https://img.shields.io/badge/社区-LinuxDo-blue?style=for-the-badge)](https://linux.do/)
+
+- 去水印核心 vendored 自 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover)（详见 `src/gemini/client/watermark/vendor/`）。
 
 ## 许可证
 

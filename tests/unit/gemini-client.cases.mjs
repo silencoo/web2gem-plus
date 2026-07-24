@@ -11,6 +11,15 @@ import {
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
+/** Minimal PNG with patched IHDR dimensions (CRC intentionally ignored by size reader). */
+function pngBytes(width, height) {
+	const bytes = Uint8Array.from(mod.base64ToBytes(TINY_PNG_BASE64));
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	view.setUint32(16, width);
+	view.setUint32(20, height);
+	return bytes;
+}
+
 async function withoutTypedArrayEncodingMethods(run) {
 	const base64Descriptor = Object.getOwnPropertyDescriptor(
 		Uint8Array.prototype,
@@ -85,13 +94,31 @@ function generatedImageEntry(
 function generatedImageCandidate(
 	text = "final text",
 	url = "https://lh3.googleusercontent.com/generated=s1024-rj",
+	id = "img_1",
 ) {
 	const candidate = [];
+	candidate[0] = "rcid_1";
 	candidate[1] = [text];
 	candidate[8] = [2];
 	candidate[12] = [];
-	candidate[12][7] = [[generatedImageEntry(url)]];
+	candidate[12][7] = [[generatedImageEntry(url, id)]];
 	return candidate;
+}
+
+function richGeneratedImageWrbLine(
+	url = "https://lh3.googleusercontent.com/gg-dl/AFfU-preview",
+	id = "CAESImg_fullsize_1",
+) {
+	const candidate = generatedImageCandidate("", url, id);
+	const inner = [
+		null,
+		["cid_full", "rid_full", "rcid_meta"],
+		null,
+		null,
+		[candidate],
+		"x".repeat(160),
+	];
+	return JSON.stringify([["wrb.fr", null, JSON.stringify(inner)]]);
 }
 
 function webImageEntry(url = "https://images.example/web.png") {
@@ -480,24 +507,510 @@ export const cases = [
 		},
 	],
 	[
+		"resolves full-size generated image urls before CDN preview variants",
+		async () => {
+			assert.deepEqual(
+				mod.fullSizeImageRefsFromParsed({
+					url: "https://lh3.googleusercontent.com/gg-dl/preview",
+					source: "generated",
+					cid: "cid",
+					rid: "rid",
+					rcid: "rcid",
+					imageId: "img_real",
+				}),
+				{ cid: "cid", rid: "rid", rcid: "rcid", imageId: "img_real" },
+			);
+			// Web download uses synthetic image_generation_content ids with real refs.
+			assert.deepEqual(
+				mod.fullSizeImageRefsFromParsed({
+					url: "https://lh3.googleusercontent.com/gg-dl/preview",
+					source: "generated",
+					cid: "c_c8098be7357bbc2c",
+					rid: "rid",
+					rcid: "rcid",
+					imageId: "http://googleusercontent.com/image_generation_content/0",
+				}),
+				{
+					cid: "c_c8098be7357bbc2c",
+					rid: "rid",
+					rcid: "rcid",
+					imageId: "http://googleusercontent.com/image_generation_content/0",
+				},
+			);
+			assert.equal(
+				mod.fullSizeImageRefsFromParsed({
+					url: "https://lh3.googleusercontent.com/gg-dl/preview",
+					source: "generated",
+					cid: "",
+					rid: "rid",
+					rcid: "rcid",
+					imageId: "img_real",
+				}),
+				null,
+			);
+			assert.equal(
+				mod.fullSizeSourcePath("c_c8098be7357bbc2c"),
+				"/app/c8098be7357bbc2c",
+			);
+			assert.deepEqual(
+				mod.fullSizeDownloadProbeUrls(
+					"https://lh3.googleusercontent.com/gg/ACRw-full",
+				),
+				[
+					"https://lh3.googleusercontent.com/gg/ACRw-full=s0-d-I?alr=yes",
+					"https://lh3.googleusercontent.com/gg/ACRw-full=d-I?alr=yes",
+					"https://lh3.googleusercontent.com/gg/ACRw-full?alr=yes",
+					"https://lh3.googleusercontent.com/rd-gg/ACRw-full=s0-d-I?alr=yes",
+					"https://lh3.googleusercontent.com/rd-gg/ACRw-full=d-I?alr=yes",
+					"https://lh3.googleusercontent.com/rd-gg/ACRw-full?alr=yes",
+				],
+			);
+			assert.equal(
+				mod.rewriteGoogleusercontentGgToRdGg(
+					"https://lh3.googleusercontent.com/gg/ACRw-full?alr=yes",
+				),
+				"https://lh3.googleusercontent.com/rd-gg/ACRw-full?alr=yes",
+			);
+			assert.equal(
+				mod.fullSizeDownloadTransformUrl(
+					"https://lh3.googleusercontent.com/gg/ACRw-full",
+				),
+				"https://lh3.googleusercontent.com/gg/ACRw-full=s0-d-I?alr=yes",
+			);
+
+			const refs20 = {
+				cid: "c_c8098be7357bbc2c",
+				rid: "r_1",
+				rcid: "rc_1",
+				imageId: "http://googleusercontent.com/image_generation_content/364",
+				mediaToken: "$AVtesttoken0123456789abcdefghijk",
+				mediaId: "bd48xubd48xubd48",
+			};
+			const payload19 = mod.buildFullSizeImageRpcPayload(refs20, { mode: 19 });
+			assert.equal(payload19[0][3][0], 19);
+			assert.equal(payload19[0][9], "");
+			const payload20 = mod.buildFullSizeImageRpcPayload(refs20, {
+				mode: 20,
+			});
+			assert.equal(payload20[0][3][0], 20);
+			assert.equal(payload20[0][3][1], "");
+			assert.equal(payload20[0][3][18], "imagen_default.complaintflow");
+			assert.equal(payload20[0][0][3][5], refs20.mediaToken);
+			assert.equal(payload20[0][9], refs20.mediaId);
+			assert.equal(payload20[1][4], refs20.mediaId);
+			const payload20Upscale = mod.buildFullSizeImageRpcPayload(refs20, {
+				mode: 20,
+				upscalePrompt: "Upscale this image to true 4K resolution",
+			});
+			assert.match(String(payload20Upscale[0][3][1]), /4K/i);
+			assert.deepEqual(
+				mod.extractGeneratedImageMediaMeta([
+					[{}, ["http://googleusercontent.com/image_generation_content/1"]],
+					["$AVtesttoken0123456789abcdefghijk", "bd48xubd48xubd48", "image/png"],
+				]),
+				{
+					mediaToken: "$AVtesttoken0123456789abcdefghijk",
+					mediaId: "bd48xubd48xubd48",
+				},
+			);
+			const primaryMeta = [];
+			primaryMeta[3] = "https://lh3.googleusercontent.com/gg/preview-a";
+			primaryMeta[5] = "$AVprimarytoken0123456789abcdefgh";
+			const secondaryMeta = [];
+			secondaryMeta[3] = "https://lh3.googleusercontent.com/gg/preview-b";
+			secondaryMeta[5] = "$AVsecondarytoken0123456789abcdef";
+			const historyEntry = [[null, null, null, primaryMeta, secondaryMeta], ["http://googleusercontent.com/image_generation_content/364"]];
+			assert.equal(
+				mod.extractGeneratedImageMediaMeta(historyEntry).mediaToken,
+				"$AVprimarytoken0123456789abcdefgh",
+			);
+			assert.equal(mod.normalizeConversationId("c8098be7357bbc2c"), "c_c8098be7357bbc2c");
+			assert.equal(
+				mod.normalizeConversationId("c_c8098be7357bbc2c"),
+				"c_c8098be7357bbc2c",
+			);
+			assert.deepEqual(mod.buildConversationHistoryRpcPayload("c8098be7357bbc2c"), [
+				"c_c8098be7357bbc2c",
+				10,
+				null,
+				1,
+				[0],
+				[4],
+				null,
+				1,
+			]);
+			assert.deepEqual(mod.fullSizeResolveModesForImage({
+				url: "https://lh3.googleusercontent.com/gg/x",
+				source: "generated",
+				mediaToken: "$AVtoken",
+			}), [20, 19]);
+			assert.deepEqual(mod.fullSizeResolveModesForImage({
+				url: "https://lh3.googleusercontent.com/gg/x",
+				source: "generated",
+			}), [19]);
+
+			const historyInner = [
+				[
+					[
+						"c_c8098be7357bbc2c",
+						"r_1",
+						"rc_1",
+						historyEntry,
+					],
+				],
+			];
+			const historyPayload = JSON.stringify([
+				["wrb.fr", "hNvQHb", JSON.stringify(historyInner)],
+			]);
+			const historyBody = `)]}'\n${historyPayload.length}\n${historyPayload}`;
+			const fromHistory = mod.extractGeneratedImagesFromConversationHistory(historyBody);
+			assert.equal(fromHistory.length >= 1, true);
+			assert.equal(
+				fromHistory[0].mediaToken,
+				"$AVprimarytoken0123456789abcdefgh",
+			);
+			assert.equal(
+				fromHistory[0].imageId,
+				"http://googleusercontent.com/image_generation_content/364",
+			);
+			const merged = mod.mergeConversationHistoryMediaIntoImages(
+				[
+					{
+						url: "https://lh3.googleusercontent.com/gg/preview-a?alr=yes",
+						source: "generated",
+						imageId: "http://googleusercontent.com/image_generation_content/364",
+						cid: "c_c8098be7357bbc2c",
+					},
+				],
+				fromHistory,
+			);
+			assert.equal(merged[0].mediaToken, "$AVprimarytoken0123456789abcdefgh");
+
+			// StreamGenerate synthetic /0 id + different URL still picks newest history token.
+			const mismatched = mod.mergeConversationHistoryMediaIntoImages(
+				[
+					{
+						url: "https://lh3.googleusercontent.com/gg-dl/stream-preview",
+						source: "generated",
+						imageId: "http://googleusercontent.com/image_generation_content/0",
+						cid: "c_c8098be7357bbc2c",
+					},
+				],
+				[
+					{
+						url: "https://lh3.googleusercontent.com/gg/old",
+						source: "generated",
+						imageId: "http://googleusercontent.com/image_generation_content/100",
+						mediaToken: "$AVoldtoken0123456789abcdefghijkl",
+					},
+					{
+						url: "https://lh3.googleusercontent.com/gg/new",
+						source: "generated",
+						imageId: "http://googleusercontent.com/image_generation_content/364",
+						mediaToken: "$AVnewtoken0123456789abcdefghijkl",
+					},
+				],
+			);
+			assert.equal(mismatched[0].mediaToken, "$AVnewtoken0123456789abcdefghijkl");
+			assert.equal(
+				mismatched[0].imageId,
+				"http://googleusercontent.com/image_generation_content/364",
+			);
+
+			// hNvQHb nests identity tuples as siblings of the image body.
+			const siblingHistory = [
+				[
+					["c_siblingcid", "r_siblingrid", "rc_siblingrcid"],
+					null,
+					null,
+					historyEntry,
+				],
+			];
+			const siblingPayload = JSON.stringify([
+				["wrb.fr", "hNvQHb", JSON.stringify(siblingHistory)],
+			]);
+			const siblingBody = `)]}'\n${siblingPayload.length}\n${siblingPayload}`;
+			const fromSibling =
+				mod.extractGeneratedImagesFromConversationHistory(siblingBody);
+			assert.equal(fromSibling[0]?.cid, "c_siblingcid");
+			assert.equal(fromSibling[0]?.rid, "r_siblingrid");
+			assert.equal(fromSibling[0]?.rcid, "rc_siblingrcid");
+			assert.equal(
+				fromSibling[0]?.mediaToken,
+				"$AVprimarytoken0123456789abcdefgh",
+			);
+
+			const framed = `)]}'\n18\n${JSON.stringify([["wrb.fr", null, JSON.stringify(["https://lh3.googleusercontent.com/full-orig"])]])}`;
+			const frames = mod.extractBatchExecuteFrames(framed);
+			assert.equal(Array.isArray(frames[0]), true);
+			assert.equal(
+				JSON.parse(frames[0][2])[0],
+				"https://lh3.googleusercontent.com/full-orig",
+			);
+
+			const cfg = {
+				...baseGeminiClientConfig(),
+				cookie: "__Secure-1PSID=psid; SAPISID=sapi",
+				log_requests: false,
+			};
+			const previewUrl = "https://lh3.googleusercontent.com/gg-dl/AFfU-preview";
+			const fullPng = pngBytes(2048, 1536);
+			const smallPng = pngBytes(512, 512);
+			const calls = [];
+			await withFetch(
+				async (url, init) => {
+					const target = String(url);
+					calls.push(target);
+					if (target.includes("/app") && (!init || init.method !== "POST")) {
+						return new Response(
+							'{"SNlM0e":"at-test","FdrFJe":"sid-test","qKIAYe":"push"}',
+							{ status: 200 },
+						);
+					}
+					if (target.includes("batchexecute")) {
+						assert.match(target, /source-path=%2Fapp%2Fcid_full/);
+						const body = JSON.stringify([
+							[
+								"wrb.fr",
+								null,
+								JSON.stringify([
+									"https://lh3.googleusercontent.com/gg/ACRw-full-orig",
+								]),
+							],
+						]);
+						return new Response(`)]}'\n${body.length}\n${body}`, {
+							status: 200,
+						});
+					}
+					// Web-style /gg/?alr=yes → text URL hops → final image URL
+					if (
+						target ===
+						"https://lh3.googleusercontent.com/gg/ACRw-full-orig?alr=yes"
+					) {
+						return new Response(
+							"https://lh3.google.com/rd-gg/ACRw-step-2?alr=yes",
+							{ status: 200, headers: { "content-type": "text/plain" } },
+						);
+					}
+					if (target === "https://lh3.google.com/rd-gg/ACRw-step-2?alr=yes") {
+						return new Response(
+							"https://lh3.googleusercontent.com/rd-gg/ACRw-final?alr=yes",
+							{ status: 200, headers: { "content-type": "text/plain" } },
+						);
+					}
+					if (
+						target ===
+						"https://lh3.googleusercontent.com/rd-gg/ACRw-final?alr=yes"
+					) {
+						return new Response(fullPng, {
+							status: 200,
+							headers: { "content-type": "image/png" },
+						});
+					}
+					if (target.includes("StreamGenerate")) {
+						return new Response(richGeneratedImageWrbLine(previewUrl), {
+							status: 200,
+						});
+					}
+					if (target.startsWith(previewUrl)) {
+						return new Response(smallPng, { status: 200 });
+					}
+					return new Response("not found", { status: 404 });
+				},
+				async () => {
+					const rich = await mod.generateRich(
+						cfg,
+						"draw image",
+						1,
+						4,
+						null,
+						null,
+					);
+					assert.equal(rich.images.length, 1);
+					assert.deepEqual(
+						mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)),
+						{ width: 2048, height: 1536 },
+					);
+				},
+			);
+			assert.equal(
+				calls.some((url) => url.includes("batchexecute")),
+				true,
+			);
+			assert.equal(
+				calls.includes(
+					"https://lh3.googleusercontent.com/gg/ACRw-full-orig?alr=yes",
+				),
+				true,
+			);
+			assert.equal(
+				calls.includes(
+					"https://lh3.googleusercontent.com/rd-gg/ACRw-final?alr=yes",
+				),
+				true,
+			);
+		},
+	],
+	[
+		"keeps CDN 4K early-stop before full-size upgrade",
+		async () => {
+			const cfg = {
+				...baseGeminiClientConfig(),
+				cookie: "__Secure-1PSID=psid; SAPISID=sapi",
+				log_requests: false,
+			};
+			const previewUrl = "https://lh3.googleusercontent.com/gg-dl/AFfU-maxhunt";
+			const fullPng = pngBytes(2048, 1536);
+			const fourKPng = pngBytes(3840, 2160);
+			const calls = [];
+			await withFetch(
+				async (url, init) => {
+					const target = String(url);
+					calls.push(target);
+					if (target.includes("/app") && (!init || init.method !== "POST")) {
+						return new Response(
+							'{"SNlM0e":"at-test","FdrFJe":"sid-test","qKIAYe":"push"}',
+							{ status: 200 },
+						);
+					}
+					if (target.includes("batchexecute")) {
+						const body = JSON.stringify([
+							[
+								"wrb.fr",
+								null,
+								JSON.stringify([
+									"https://lh3.googleusercontent.com/full-orig-2k",
+								]),
+							],
+						]);
+						return new Response(`)]}'\n${body.length}\n${body}`, {
+							status: 200,
+						});
+					}
+					if (
+						target ===
+							"https://lh3.googleusercontent.com/full-orig-2k?alr=yes" ||
+						target.includes("=s0-d-I?alr=yes") ||
+						target.includes("=d-I?alr=yes")
+					) {
+						return new Response(
+							"https://lh3.googleusercontent.com/full-final-2k.jpg",
+							{ status: 200, headers: { "content-type": "text/plain" } },
+						);
+					}
+					if (target === "https://lh3.googleusercontent.com/full-final-2k.jpg") {
+						return new Response(fullPng, {
+							status: 200,
+							headers: { "content-type": "image/png" },
+						});
+					}
+					if (target.includes("StreamGenerate")) {
+						return new Response(richGeneratedImageWrbLine(previewUrl), {
+							status: 200,
+						});
+					}
+					if (target === `${previewUrl}=s4096-rj`) {
+						return new Response(fourKPng, { status: 200 });
+					}
+					if (target.startsWith(previewUrl)) {
+						return new Response(fullPng, { status: 200 });
+					}
+					return new Response("not found", { status: 404 });
+				},
+				async () => {
+					const rich = await mod.generateRich(
+						cfg,
+						"draw image",
+						1,
+						4,
+						null,
+						null,
+					);
+					assert.deepEqual(
+						mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)),
+						{ width: 3840, height: 2160 },
+					);
+				},
+			);
+			// CDN-first early-stops on preferred 4K; full-size upgrade is skipped.
+			assert.equal(calls.includes(`${previewUrl}=s4096-rj`), true);
+			assert.equal(
+				calls.includes("https://lh3.googleusercontent.com/full-final-2k.jpg"),
+				false,
+			);
+		},
+	],
+	[
 		"preserves generated image URL candidates and browser headers",
 		async () => {
 			const previewUrl = "https://lh3.googleusercontent.com/generated=s1024-rj";
-			assert.deepEqual(mod.generatedImagePreviewFetchUrls(previewUrl), [
+			const previewCandidates = mod.generatedImagePreviewFetchUrls(previewUrl);
+			assert.equal(
+				previewCandidates[0],
+				"https://lh3.googleusercontent.com/generated=s4096-rj",
+			);
+			assert.equal(
+				previewCandidates[1],
 				"https://lh3.googleusercontent.com/generated=s2048-rj",
-				previewUrl,
-			]);
+			);
+			assert.equal(
+				previewCandidates.includes(previewUrl),
+				true,
+			);
+			assert.equal(
+				mod.stripGoogleusercontentSizeSuffix(previewUrl),
+				"https://lh3.googleusercontent.com/generated",
+			);
+
 			const directUrl =
 				"https://lh3.googleusercontent.com/gg-dl/AFfU-direct-image";
-			assert.deepEqual(mod.generatedImagePreviewFetchUrls(directUrl), [
-				directUrl,
-				`${directUrl}=s2048-rj`,
-			]);
-			assert.deepEqual(
-				mod.generatedImagePreviewFetchUrls(
-					"https://lh3.googleusercontent.com/generated=s2048-rj",
-				),
-				["https://lh3.googleusercontent.com/generated=s2048-rj"],
+			const directCandidates = mod.generatedImagePreviewFetchUrls(directUrl);
+			assert.equal(directCandidates[0], `${directUrl}=s4096-rj`);
+			assert.equal(directCandidates[1], `${directUrl}=s2048-rj`);
+			assert.equal(directCandidates.includes(directUrl), true);
+			assert.equal(
+				directCandidates.indexOf(`${directUrl}=s4096-rj`) <
+					directCandidates.indexOf(directUrl),
+				true,
+			);
+
+			const alreadyLarge =
+				"https://lh3.googleusercontent.com/generated=s2048-rj";
+			const largeCandidates = mod.generatedImagePreviewFetchUrls(alreadyLarge);
+			assert.equal(largeCandidates[0], "https://lh3.googleusercontent.com/generated=s4096-rj");
+			assert.equal(largeCandidates.includes(alreadyLarge), true);
+
+			assert.equal(
+				mod.isPreferredGeneratedImage({
+					width: 1024,
+					height: 1024,
+					pixels: 1024 * 1024,
+				}),
+				false,
+			);
+			assert.equal(
+				mod.isPreferredGeneratedImage({
+					width: 2048,
+					height: 2048,
+					pixels: 2048 * 2048,
+				}),
+				false,
+			);
+			assert.equal(
+				mod.isPreferredGeneratedImage({
+					width: 3840,
+					height: 2160,
+					pixels: 3840 * 2160,
+				}),
+				true,
+			);
+			assert.equal(
+				mod.isPreferredGeneratedImage({
+					width: 512,
+					height: 512,
+					pixels: 512 * 512,
+				}),
+				false,
 			);
 
 			const headers = mod.generatedImageFetchHeaders({
@@ -520,7 +1033,7 @@ export const cases = [
 		},
 	],
 	[
-		"fetches direct gg-dl generated image URLs before trying size suffix fallback",
+		"prefers high-res CDN variants over raw gg-dl preview URLs",
 		async () => {
 			const cfg = {
 				gemini_origin: "https://gemini.example",
@@ -536,6 +1049,8 @@ export const cases = [
 			};
 			const imageUrl =
 				"https://lh3.googleusercontent.com/gg-dl/AFfU-direct-image";
+			const largePng = pngBytes(2048, 2048);
+			const smallPng = mod.base64ToBytes(TINY_PNG_BASE64);
 			const calls = [];
 			await withFetch(
 				async (url) => {
@@ -546,8 +1061,14 @@ export const cases = [
 							{ status: 200 },
 						);
 					}
+					if (String(url) === `${imageUrl}=s4096-rj`) {
+						return new Response(largePng, {
+							status: 200,
+							headers: { "content-type": "image/png" },
+						});
+					}
 					if (String(url) === imageUrl) {
-						return new Response(mod.base64ToBytes(TINY_PNG_BASE64), {
+						return new Response(smallPng, {
 							status: 200,
 							headers: { "content-type": "image/png" },
 						});
@@ -566,16 +1087,64 @@ export const cases = [
 					assert.equal(rich.text, "");
 					assert.equal(rich.images.length, 1);
 					assert.equal(rich.images[0].url, imageUrl);
-					assert.equal(rich.images[0].base64, TINY_PNG_BASE64);
 					assert.equal(rich.images[0].outputFormat, "png");
+					assert.deepEqual(mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)), {
+						width: 2048,
+						height: 2048,
+					});
 				},
 			);
 			assert.match(
 				calls[0],
 				/^https:\/\/gemini\.example\/_\/BardChatUi\/data\/assistant\.lamda\.BardFrontendService\/StreamGenerate\?/,
 			);
-			assert.equal(calls[1], imageUrl);
-			assert.equal(calls.length, 2);
+			assert.equal(calls[1], `${imageUrl}=s4096-rj`);
+			assert.equal(calls.includes(`${imageUrl}=s2048-rj`), true);
+		},
+	],
+	[
+		"keeps the largest generated image when early CDN sizes are tiny previews",
+		async () => {
+			const cfg = baseGeminiClientConfig();
+			const imageUrl =
+				"https://lh3.googleusercontent.com/gg-dl/AFfU-keep-largest";
+			const tiny = pngBytes(512, 512);
+			const better = pngBytes(1280, 1280);
+			const calls = [];
+			await withFetch(
+				async (url) => {
+					calls.push(String(url));
+					if (String(url).includes("StreamGenerate")) {
+						return new Response(
+							richWrbLine(generatedImageCandidate("", imageUrl)),
+							{ status: 200 },
+						);
+					}
+					if (String(url).endsWith("=s4096-rj")) {
+						return new Response(tiny, { status: 200 });
+					}
+					if (String(url).endsWith("=s2048-rj")) {
+						return new Response(better, { status: 200 });
+					}
+					return new Response("not found", { status: 404 });
+				},
+				async () => {
+					const rich = await mod.generateRich(
+						cfg,
+						"draw image",
+						1,
+						4,
+						null,
+						null,
+					);
+					assert.deepEqual(
+						mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)),
+						{ width: 1280, height: 1280 },
+					);
+				},
+			);
+			assert.equal(calls.includes(`${imageUrl}=s4096-rj`), true);
+			assert.equal(calls.includes(`${imageUrl}=s2048-rj`), true);
 		},
 	],
 	[
@@ -645,7 +1214,12 @@ export const cases = [
 					assert.equal(images[1].base64, undefined);
 				},
 			);
-			assert.equal(calls, 2);
+			// First image probes CDN size variants; second image is skipped after
+			// the aggregate byte budget is nearly exhausted.
+			const firstImageCandidates = mod.generatedImagePreviewFetchUrls(
+				"https://images.example/one.png",
+			).length;
+			assert.equal(calls, firstImageCandidates + 1);
 		},
 	],
 	[
@@ -663,10 +1237,15 @@ export const cases = [
 							{ status: 200 },
 						);
 					}
-					if (String(url).endsWith("=s2048-rj")) {
+					if (
+						String(url).endsWith("=s4096-rj") ||
+						String(url).endsWith("=s2048-rj") ||
+						String(url).endsWith("=s0") ||
+						String(url).endsWith("=d")
+					) {
 						return new Response("preview not ready", { status: 404 });
 					}
-					if (String(url) === imageUrl) {
+					if (String(url) === imageUrl || String(url).endsWith("/generated")) {
 						return new Response(
 							Uint8Array.from([0xff, 0xd8, 0xff, 0xdb, 0x00]),
 							{ status: 200, headers: { "content-type": "image/jpeg" } },
@@ -689,9 +1268,13 @@ export const cases = [
 			);
 			assert.equal(
 				calls[1],
-				"https://lh3.googleusercontent.com/generated=s2048-rj",
+				"https://lh3.googleusercontent.com/generated=s4096-rj",
 			);
-			assert.equal(calls[2], imageUrl);
+			assert.equal(
+				calls.includes(imageUrl) ||
+					calls.includes("https://lh3.googleusercontent.com/generated"),
+				true,
+			);
 		},
 	],
 	[
@@ -1353,7 +1936,7 @@ export const cases = [
 				},
 			);
 			assert.deepEqual(logs, [
-				"[web2gem] Retry 1/2 type=Error code=retry_test status=502",
+				"[web2gem-plus] Retry 1/2 type=Error code=retry_test status=502",
 			]);
 			assert.doesNotMatch(logs[0], /boom secret/);
 		},

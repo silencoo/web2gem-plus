@@ -1,6 +1,8 @@
-# web2gem
+# web2gem-plus
 
 [English](README.md) | [简体中文](README.zh.md)
+
+> **Fork notice.** `web2gem-plus` is a community-maintained fork of [`Guardinary/web2gem`](https://github.com/Guardinary/web2gem). It keeps the upstream API surface intact and adds targeted enhancements (notably the optional Gemini watermark-removal pipeline). All credit for the original architecture goes to the upstream project.
 
 Lightweight Gemini Web gateway with OpenAI-compatible and Google-compatible APIs. Deploy the single Worker bundle to Cloudflare or run it with Docker, with optional API authentication and Gemini cookie-backed features.
 
@@ -10,7 +12,7 @@ Lightweight Gemini Web gateway with OpenAI-compatible and Google-compatible APIs
 
 ## Contents
 
-- [web2gem](#web2gem)
+- [web2gem-plus](#web2gem-plus)
   - [Contents](#contents)
   - [Overview](#overview)
   - [Choose an Edition](#choose-an-edition)
@@ -38,7 +40,7 @@ Lightweight Gemini Web gateway with OpenAI-compatible and Google-compatible APIs
 
 ## Overview
 
-`web2gem` lets OpenAI-compatible and Google Gemini-compatible clients use Gemini Web through a familiar HTTP API. The `main` edition is intentionally simple: it has no account database or admin console, and optional authenticated Gemini features use one runtime `GEMINI_COOKIE` that is refreshed in memory when possible.
+`web2gem-plus` lets OpenAI-compatible and Google Gemini-compatible clients use Gemini Web through a familiar HTTP API. The `main` edition is intentionally simple: it has no account database or admin console, and optional authenticated Gemini features use one runtime `GEMINI_COOKIE` that is refreshed in memory when possible.
 
 It works well for personal deployments, simple proxies, and users who prefer a small stateless runtime. Cloudflare Workers can use `cloudflare:sockets` for upstream transport when regular `fetch` paths are rate-limited; Docker uses standard `fetch` by default.
 
@@ -78,6 +80,7 @@ Choose `main` if you want the simplest deployment and do not need a persistent a
 | Structured output            | Validates and canonicalizes final JSON for non-streaming structured responses; streaming structured output is rejected by default.              |
 | Large context handling       | With `GEMINI_COOKIE` configured, large prompt context can be uploaded as Gemini text attachments instead of remaining entirely inline.           |
 | Image generation             | Supports explicit OpenAI `image_generation` metadata for non-streaming Chat/Responses requests, plus `/v1/images/generations` and `/v1/images/edits`; a Gemini cookie is required. |
+| Watermark removal            | Optional. Uses [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) reverse-alpha blending on a **bottom-right corner crop** after the web full-size download path. On Cloudflare Workers, full-frame scrub of ~2K+ assets often exceeds the default CPU budget (Error 1102). Prefer `"remove_watermark": false` when you only need max resolution, or scrub offline with GargantuaX / the browser extension. Default remains `true` for smaller preview-class images. |
 | Image input handling         | Resolves user-provided inline/base64 images through the Gemini provider path. The Worker does not fetch remote image or file URLs.                |
 | Generic file attachments     | With a Gemini cookie, request-local `input_file` and inline non-image data can use Gemini Web upload references with arbitrary filenames and MIME types; persistent `/v1/files` storage is not implemented. |
 | Worker and Docker deployment | Deploy the Worker bundle to Cloudflare Workers or self-host with Docker / Docker Compose; neither mode requires an account database on `main`.   |
@@ -103,7 +106,7 @@ Gemini Web is an upstream web protocol and may change without notice. This proje
 ### Health
 
 ```sh
-curl https://your-web2gem.example/
+curl https://your-web2gem-plus.example/
 ```
 
 Returns service status, version, and the model IDs currently exposed by the adapter.
@@ -111,7 +114,7 @@ Returns service status, version, and the model IDs currently exposed by the adap
 ### OpenAI Chat Completions
 
 ```sh
-curl https://your-web2gem.example/v1/chat/completions \
+curl https://your-web2gem-plus.example/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -127,7 +130,7 @@ Set `"stream": true` to receive Server-Sent Events.
 For image generation, send explicit OpenAI image-generation metadata with a non-streaming request. The Worker routes requests with either `tool_choice: { "type": "image_generation" }` or a `tools[]` entry `{ "type": "image_generation" }` through a pass-through image path. This mode uses only user-authored prompt text plus user-provided inline/existing image inputs, rejects attachments-only prompts, and returns upstream text/images as data-image or URL markdown in Chat Completions. Remote image/file URLs are not fetched. `GEMINI_COOKIE` is required for image generation, image editing, and image byte fetching.
 
 ```sh
-curl https://your-web2gem.example/v1/chat/completions \
+curl https://your-web2gem-plus.example/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -140,7 +143,7 @@ curl https://your-web2gem.example/v1/chat/completions \
 ### OpenAI Responses
 
 ```sh
-curl https://your-web2gem.example/v1/responses \
+curl https://your-web2gem-plus.example/v1/responses \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -156,7 +159,7 @@ Responses image generation uses the same explicit metadata and returns `image_ge
 `POST /v1/images/generations` and `POST /v1/images/edits` are supported as non-streaming image-generation routes. They do not require `tools` or `tool_choice`, but they still require `GEMINI_COOKIE`.
 
 ```sh
-curl https://your-web2gem.example/v1/images/generations \
+curl https://your-web2gem-plus.example/v1/images/generations \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -168,10 +171,30 @@ curl https://your-web2gem.example/v1/images/generations \
 
 Image edits require `prompt` plus at least one local image input. JSON and multipart edit inputs can use `image`, `images`, `image_url`, or `input_image` with inline base64/data URL image bytes. Remote `http://` / `https://` image URLs are rejected and are not fetched by the Worker. Image endpoints support only `n: 1`, default `response_format` to `b64_json`, also accept `response_format: "url"` for provider URLs, and reject `stream: true`.
 
+Optional image fields:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `remove_watermark` | `true` | When `true`, scrub Gemini corner sparkles after hydration. When `false`, return the full-size bytes as downloaded (watermark kept). Also accepted on Chat / Responses image-generation requests and multipart edits. |
+
+Hydration prefers Gemini’s web full-size download chain (`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`), which is what yields multi‑MB ~2K assets. Watermark scrubbing is a separate CPU-heavy step: early “watermark looks wrong on small images” cases were often **preview CDN** downloads (~1MP), not a broken scrubber. For large full-size outputs on Workers, use `"remove_watermark": false` and remove the sparkle locally with [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) if needed. Paid Workers can raise `limits.cpu_ms` (up to 5 minutes) if you want in-Worker scrubbing of larger assets.
+
+```sh
+curl https://your-web2gem-plus.example/v1/images/generations \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.5-flash",
+    "prompt": "Generate a landscape photo.",
+    "response_format": "b64_json",
+    "remove_watermark": false
+  }'
+```
+
 ### Google Gemini API
 
 ```sh
-curl https://your-web2gem.example/v1beta/models/gemini-3.5-flash:generateContent \
+curl https://your-web2gem-plus.example/v1beta/models/gemini-3.5-flash:generateContent \
   -H "x-api-key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -188,11 +211,12 @@ For streaming, call `:streamGenerateContent` on the same model path.
 
 ## Models
 
-`web2gem` exposes a fixed model map in `src/models/index.ts`.
+`web2gem-plus` exposes a fixed model map in `src/models/index.ts`.
 
 | Model ID                         | Description                                                 |
 | -------------------------------- | ----------------------------------------------------------- |
 | `gemini-3.5-flash`               | Fast general-purpose model.                                 |
+| `gemini-3.6-flash`               | Gemini 3.6 Flash — stronger agentic / coding Fast model.    |
 | `gemini-3.5-flash-thinking`      | Deep thinking mode with longer output.                      |
 | `gemini-3.1-pro`                 | Pro route; requires a valid Gemini cookie for real routing. |
 | `gemini-3.1-pro-enhanced`        | Experimental enhanced Pro output mode.                      |
@@ -208,7 +232,7 @@ Both deployment modes can run without secrets. Configure optional secrets only w
 
 ### Option 1: Deploy the release single-file Worker
 
-Download the main-edition artifact `web2gem-main-worker.js` from the [Releases](https://github.com/Guardinary/web2gem/releases) page, open your Cloudflare Worker in the dashboard, and replace the Worker source with the contents of that file. In the Worker dashboard settings, add the `nodejs_compat` compatibility flag.
+Download the main-edition artifact `web2gem-plus-main-worker.js` from the [Releases](https://github.com/silencoo/web2gem-plus/releases) page, open your Cloudflare Worker in the dashboard, and replace the Worker source with the contents of that file. In the Worker dashboard settings, add the `nodejs_compat` compatibility flag.
 
 ![Cloudflare Worker settings showing nodejs_compat](./docs/images/cloudflare-worker-settings-nodejs-compat.png)
 
@@ -216,9 +240,9 @@ Each release publishes these assets:
 
 | Asset | Use |
 |-------|-----|
-| `web2gem-main-worker.js` | Main-edition single-file Cloudflare Worker bundle. |
-| `web2gem-main_<tag>_docker_linux_amd64.tar.gz` | Main-edition Docker image archive for `linux/amd64`. |
-| `web2gem-main_<tag>_docker_linux_arm64.tar.gz` | Main-edition Docker image archive for `linux/arm64`. |
+| `web2gem-plus-main-worker.js` | Main-edition single-file Cloudflare Worker bundle. |
+| `web2gem-plus-main_<tag>_docker_linux_amd64.tar.gz` | Main-edition Docker image archive for `linux/amd64`. |
+| `web2gem-plus-main_<tag>_docker_linux_arm64.tar.gz` | Main-edition Docker image archive for `linux/arm64`. |
 | `sha256sums.txt` | Checksums for the released files. |
 
 Secrets are optional. In the Worker dashboard, open the Worker settings and add variables/secrets only for the features you need. Set `API_KEYS` when you want to protect shared access, and set `GEMINI_COOKIE` when Pro routing, large-context text attachments, or signed-in Gemini Web behavior is needed.
@@ -238,7 +262,7 @@ docker compose up -d
 
 On PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
 
-The provided [`compose.yaml`](compose.yaml) pulls `ghcr.io/guardinary/web2gem:latest` by default, maps `${PORT:-52389}:${PORT:-52389}`, and forwards the runtime variables from `.env`. Set `API_KEYS` in `.env` for shared deployments, and set `GEMINI_COOKIE` when Pro routing, image generation/editing, large-context text attachments, or other signed-in Gemini Web behavior is needed. To pin a specific image tag, set `WEB2GEM_IMAGE=ghcr.io/guardinary/web2gem:<tag>` in `.env`.
+The provided [`compose.yaml`](compose.yaml) pulls `ghcr.io/silencoo/web2gem-plus:latest` by default, maps `${PORT:-52389}:${PORT:-52389}`, and forwards the runtime variables from `.env`. Set `API_KEYS` in `.env` for shared deployments, and set `GEMINI_COOKIE` when Pro routing, image generation/editing, large-context text attachments, or other signed-in Gemini Web behavior is needed. To pin a specific image tag, set `WEB2GEM_PLUS_IMAGE=ghcr.io/silencoo/web2gem-plus:<tag>` in `.env`.
 
 After the container starts, verify the local health route:
 
@@ -251,15 +275,15 @@ If you changed `PORT` in `.env`, use that host port instead. Docker deployments 
 For one-off local testing without Compose, you can still build and run the image directly:
 
 ```sh
-docker build -t web2gem .
-docker run --rm -p 52389:52389 --env-file .env web2gem
+docker build -t web2gem-plus .
+docker run --rm -p 52389:52389 --env-file .env web2gem-plus
 ```
 
 Release pages also provide prebuilt Docker image archives. Download the archive matching your platform, load it, and run the tagged image:
 
 ```sh
-gzip -dc web2gem-main_<tag>_docker_linux_amd64.tar.gz | docker load
-docker run --rm -p 52389:52389 --env-file .env web2gem:<tag>
+gzip -dc web2gem-plus-main_<tag>_docker_linux_amd64.tar.gz | docker load
+docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 ```
 
 If the upstream Gemini Web path starts returning empty output, first check whether `GEMINI_BL` needs to be refreshed from the current Gemini Web frontend. If Cloudflare egress is rate-limited, set `GEMINI_ORIGIN` to your own forwarding service or proxy endpoint.
@@ -318,7 +342,7 @@ For local development, use Wrangler environment support or pass bindings through
 
 When `API_KEYS` is empty, every route except Cloudflare/Wrangler infrastructure is publicly callable. For any shared deployment, set at least one API key.
 
-`web2gem` accepts:
+`web2gem-plus` accepts:
 
 - `Authorization: Bearer <key>`
 - `x-api-key: <key>`
@@ -419,7 +443,11 @@ Never commit Gemini cookies or API keys. Store secrets in Cloudflare Worker secr
 
 ## Acknowledgements
 
+This project is a fork of [Guardinary/web2gem](https://github.com/Guardinary/web2gem). All upstream behavior and architecture originate there; this fork adds targeted enhancements (notably the optional watermark-removal pipeline).
+
 [![LinuxDo](https://img.shields.io/badge/Community-LinuxDo-blue?style=for-the-badge)](https://linux.do/)
+
+- Watermark removal core vendored from [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) (see `src/gemini/client/watermark/vendor/`).
 
 ## License
 

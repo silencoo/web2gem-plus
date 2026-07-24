@@ -150,7 +150,7 @@ function pageTokenCacheTtl(tokens: PageTokens): number {
 }
 
 function hasAnyPageToken(tokens: PageTokens): boolean {
-	return !!(tokens.at || tokens.push_id);
+	return !!(tokens.at || tokens.push_id || tokens.sid);
 }
 
 function validGeminiPushId(value: unknown): string {

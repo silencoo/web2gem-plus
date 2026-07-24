@@ -89,26 +89,49 @@ export async function parseImageEditMultipartRequest(
 export function parseImageEndpointBoolean(
 	value: unknown,
 ): { value: boolean | undefined } | { response: Response } {
+	return parseOptionalRequestBoolean(value, "stream");
+}
+
+/**
+ * Parse an optional JSON/form boolean. Accepts true/false, 0/1, and common
+ * string forms (`true`/`false`/`yes`/`no`/`on`/`off`).
+ */
+export function parseOptionalRequestBoolean(
+	value: unknown,
+	fieldName: string,
+): { value: boolean | undefined } | { response: Response } {
 	if (value == null) return { value: undefined };
 	if (typeof value === "boolean") return { value };
 	if (typeof value === "number") {
 		if (value === 1) return { value: true };
 		if (value === 0) return { value: false };
-		return invalidBooleanResponse();
+		return invalidBooleanResponse(fieldName);
 	}
-	if (typeof value !== "string") return invalidBooleanResponse();
+	if (typeof value !== "string") return invalidBooleanResponse(fieldName);
 
 	const normalized = value.trim().toLowerCase();
 	if (!normalized) return { value: undefined };
 	if (["true", "1", "yes", "on"].includes(normalized)) return { value: true };
 	if (["false", "0", "no", "off"].includes(normalized)) return { value: false };
-	return invalidBooleanResponse();
+	return invalidBooleanResponse(fieldName);
 }
 
-function invalidBooleanResponse(): { response: Response } {
+/** Parse `remove_watermark` (default true when omitted). */
+export function parseRemoveWatermarkOption(
+	req: UnknownRecord,
+): { removeWatermark: boolean } | { response: Response } {
+	const parsed = parseOptionalRequestBoolean(
+		req.remove_watermark,
+		"remove_watermark",
+	);
+	if ("response" in parsed) return parsed;
+	return { removeWatermark: parsed.value !== false };
+}
+
+function invalidBooleanResponse(fieldName: string): { response: Response } {
 	return {
 		response: openAIErrorResponse(
-			"stream must be a boolean",
+			`${fieldName} must be a boolean`,
 			400,
 			"invalid_request",
 		),
@@ -142,6 +165,15 @@ function imageEditBodyFromForm(
 	const stream = parseImageEndpointBoolean(streamValue);
 	if ("response" in stream) return stream;
 	if (stream.value !== undefined) body.stream = stream.value;
+
+	const removeWatermarkValue = formStringValue(form, "remove_watermark");
+	const removeWatermark = parseOptionalRequestBoolean(
+		removeWatermarkValue,
+		"remove_watermark",
+	);
+	if ("response" in removeWatermark) return removeWatermark;
+	if (removeWatermark.value !== undefined)
+		body.remove_watermark = removeWatermark.value;
 
 	return { body };
 }

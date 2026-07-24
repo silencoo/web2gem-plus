@@ -23,3 +23,9 @@ AGENTS.md
 .trellis/worktrees/
 .trellis/tasks/
 .trellis/workspace/
+
+# Local scratch / temp directories
+/tmp/
+/.tmp/
+tmp*/
+.tmp*/

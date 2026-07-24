@@ -6,7 +6,7 @@ if (!(await commandAvailable("docker"))) {
 	process.exit(0);
 }
 
-const image = `web2gem:smoke-${process.pid}`;
+const image = `web2gem-plus:smoke-${process.pid}`;
 let container = "";
 
 try {

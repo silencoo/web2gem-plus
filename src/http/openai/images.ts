@@ -21,11 +21,13 @@ import {
 	collectImageEditParts,
 	parseImageEditMultipartRequest,
 	parseImageEndpointBoolean,
+	parseRemoveWatermarkOption,
 } from "./images-input";
 
 type ParsedImageEndpointOptions = {
 	prompt: string;
 	responseFormat: OpenAIImagesResponseFormat;
+	removeWatermark: boolean;
 };
 
 type ParsedImageEndpointResult =
@@ -50,6 +52,7 @@ export async function handleImageGenerations(
 			input: parsed.prompt,
 		},
 		parsed.responseFormat,
+		parsed.removeWatermark,
 		"openai_images_generations",
 	);
 }
@@ -84,6 +87,7 @@ export async function handleImageEdits(
 			],
 		},
 		parsed.responseFormat,
+		parsed.removeWatermark,
 		"openai_images_edits",
 	);
 }
@@ -115,6 +119,7 @@ export async function handleImageEditsMultipart(
 			imageInputs: parsedForm.imageInputs,
 		},
 		parsed.responseFormat,
+		parsed.removeWatermark,
 		"openai_images_edits_multipart",
 	);
 }
@@ -140,6 +145,9 @@ function parseImageEndpointOptions(
 	const responseFormat = parseImagesResponseFormat(req.response_format);
 	if ("response" in responseFormat) return responseFormat;
 
+	const removeWatermark = parseRemoveWatermarkOption(req);
+	if ("response" in removeWatermark) return removeWatermark;
+
 	const prompt = typeof req.prompt === "string" ? req.prompt.trim() : "";
 	if (!prompt) {
 		return {
@@ -151,7 +159,11 @@ function parseImageEndpointOptions(
 		};
 	}
 
-	return { prompt, responseFormat: responseFormat.responseFormat };
+	return {
+		prompt,
+		responseFormat: responseFormat.responseFormat,
+		removeWatermark: removeWatermark.removeWatermark,
+	};
 }
 
 function validateImageCount(value: unknown): Response | null {
@@ -190,6 +202,7 @@ async function handleForcedImageEndpoint(
 	provider: CompletionProvider,
 	imageReq: UnknownRecord,
 	responseFormat: OpenAIImagesResponseFormat,
+	removeWatermark: boolean,
 	stagePrefix: string,
 ): Promise<Response> {
 	return handlePreparedForcedImageEndpoint(
@@ -204,6 +217,7 @@ async function handleForcedImageEndpoint(
 				true,
 			),
 		responseFormat,
+		removeWatermark,
 		stagePrefix,
 	);
 }
@@ -213,6 +227,7 @@ async function handleForcedImageEndpointFromUserInput(
 	provider: CompletionProvider,
 	input: Parameters<typeof prepareOpenAIImageGenerationFromUserInput>[2],
 	responseFormat: OpenAIImagesResponseFormat,
+	removeWatermark: boolean,
 	stagePrefix: string,
 ): Promise<Response> {
 	return handlePreparedForcedImageEndpoint(
@@ -220,6 +235,7 @@ async function handleForcedImageEndpointFromUserInput(
 		provider,
 		() => prepareOpenAIImageGenerationFromUserInput(cfg, provider, input, true),
 		responseFormat,
+		removeWatermark,
 		stagePrefix,
 	);
 }
@@ -229,6 +245,7 @@ async function handlePreparedForcedImageEndpoint(
 	provider: CompletionProvider,
 	prepare: () => ReturnType<typeof prepareOpenAIImageGenerationCompletion>,
 	responseFormat: OpenAIImagesResponseFormat,
+	removeWatermark: boolean,
 	stagePrefix: string,
 ): Promise<Response> {
 	if (!provider.generateRich) {
@@ -276,6 +293,7 @@ async function handlePreparedForcedImageEndpoint(
 			{ prompt, rm, fileRefs },
 			{
 				hydrateGeneratedImageBytes: responseFormat === "b64_json",
+				removeWatermark,
 			},
 		);
 	} catch (e) {

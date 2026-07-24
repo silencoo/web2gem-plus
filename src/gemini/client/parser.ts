@@ -29,6 +29,10 @@ export type GeminiParsedImage = {
 	cid?: string;
 	rid?: string;
 	rcid?: string;
+	/** WRB media handle (e.g. `$AV…`) used by web 4K / mode-20 full-size. */
+	mediaToken?: string;
+	/** Short generation media id (e.g. `bd48xubd48xubd48`) for mode-20 refs. */
+	mediaId?: string;
 };
 
 export type GeminiResponseParts = {
@@ -207,6 +211,9 @@ export function extractResponseParts(raw: unknown): GeminiResponseParts {
 	const candidateStates = new Map<number, CandidateState>();
 	let candidateCount = 0;
 	let fatalCode = "";
+	let stickyCid = "";
+	let stickyRid = "";
+	let stickyRcid = "";
 	const source = String(raw || "");
 	for (const envelope of parseWrbEnvelopes(source)) {
 		fatalCode ||= fatalCodeFromEnvelope(envelope);
@@ -215,11 +222,22 @@ export function extractResponseParts(raw: unknown): GeminiResponseParts {
 		fatalCode ||= fatalCodeFromInner(inner);
 		const candidates = Array.isArray(inner[4]) ? inner[4] : [];
 		const metadata = Array.isArray(inner[1]) ? inner[1] : [];
+		const cid = stringAt(metadata[0]);
+		const rid = stringAt(metadata[1]);
+		const rcid = stringAt(metadata[2]);
+		if (cid) stickyCid = cid;
+		if (rid) stickyRid = rid;
+		if (rcid) stickyRcid = rcid;
+		const stickyMetadata = [
+			stickyCid || cid || null,
+			stickyRid || rid || null,
+			stickyRcid || rcid || null,
+		];
 		candidateCount += candidates.length;
 		for (let index = 0; index < candidates.length; index++) {
 			const candidate = candidates[index];
 			if (!Array.isArray(candidate)) continue;
-			const next = parseCandidateState(candidate, index, metadata);
+			const next = parseCandidateState(candidate, index, stickyMetadata);
 			const prev = candidateStates.get(index);
 			if (!prev || shouldReplaceCandidateState(prev, next))
 				candidateStates.set(index, next);
@@ -227,7 +245,18 @@ export function extractResponseParts(raw: unknown): GeminiResponseParts {
 	}
 
 	const selected = selectCandidateState([...candidateStates.values()]);
-	const images = selected ? dedupeImages(selected.images) : [];
+	const images = selected
+		? dedupeImages(
+				selected.images.map((image) => {
+					const next = { ...image };
+					if (!next.cid && stickyCid) next.cid = stickyCid;
+					if (!next.rid && stickyRid) next.rid = stickyRid;
+					if ((!next.rcid || next.rcid === "0") && stickyRcid)
+						next.rcid = stickyRcid;
+					return next;
+				}),
+			)
+		: [];
 	const generatedImageCount = images.filter(
 		(image) => image.source === "generated",
 	).length;
@@ -456,8 +485,144 @@ function appendGeneratedImages(
 		image.imageId = imageId;
 		if (context.cid) image.cid = context.cid;
 		if (context.rid) image.rid = context.rid;
+		const media = extractGeneratedImageMediaMeta(item);
+		if (media.mediaToken) image.mediaToken = media.mediaToken;
+		if (media.mediaId) image.mediaId = media.mediaId;
 		out.push(image);
 	}
+}
+
+/** Pull `$A…` handles and short media ids from a generated-image WRB entry. */
+export function extractGeneratedImageMediaMeta(item: unknown): {
+	mediaToken?: string;
+	mediaId?: string;
+} {
+	// Web history / download path stores the primary handle at [0][3][5].
+	const explicitToken = stringAt(getNested(item, [0, 3, 5]));
+	let mediaToken = isMediaToken(explicitToken) ? explicitToken : undefined;
+	let mediaId: string | undefined;
+
+	const strings: string[] = [];
+	collectStrings(item, strings, 0);
+	for (const value of strings) {
+		if (!mediaToken && isMediaToken(value)) {
+			mediaToken = value;
+			continue;
+		}
+		// Gemini generation media ids are short lowercase alphanumerics (e.g. bd48xubd48xubd48).
+		if (!mediaId && isMediaId(value)) mediaId = value;
+	}
+	return { mediaToken, mediaId };
+}
+
+/**
+ * Walk an arbitrary WRB / batchexecute tree (StreamGenerate or hNvQHb) and
+ * collect generated-image entries with mediaToken when present.
+ */
+export function collectGeneratedImagesFromTree(
+	raw: unknown,
+	context: { cid?: string; rid?: string; rcid?: string } = {},
+	maxDepth = 16,
+): GeminiParsedImage[] {
+	const out: GeminiParsedImage[] = [];
+	walkGeneratedImageTree(
+		raw,
+		{ rcid: context.rcid || "", ...context },
+		out,
+		0,
+		maxDepth,
+	);
+	return dedupeImages(out);
+}
+
+function walkGeneratedImageTree(
+	raw: unknown,
+	context: CandidateImageContext,
+	out: GeminiParsedImage[],
+	depth: number,
+	maxDepth: number,
+): void {
+	if (!Array.isArray(raw) || depth > maxDepth) return;
+	if (isResponseIdTuple(raw)) {
+		const next = contextFromResponseTuple(raw, context);
+		for (const item of raw) {
+			if (typeof item === "string") continue;
+			walkGeneratedImageTree(item, next, out, depth + 1, maxDepth);
+		}
+		return;
+	}
+	// Prefer the web history shape: URL at [0][3][3] (mediaToken often at [0][3][5]).
+	if (isHistoryGeneratedImageEntry(raw)) {
+		appendGeneratedImages(out, [raw], context);
+		return;
+	}
+
+	// hNvQHb nests identity tuples as siblings of the message body (not parents).
+	// Lift cid/rid/rcid from any tuple in this array before walking children.
+	let scoped = context;
+	for (const item of raw) {
+		if (isResponseIdTuple(item)) {
+			scoped = contextFromResponseTuple(item, scoped);
+		}
+	}
+	for (const item of raw)
+		walkGeneratedImageTree(item, scoped, out, depth + 1, maxDepth);
+}
+
+function contextFromResponseTuple(
+	tuple: unknown[],
+	context: CandidateImageContext,
+): CandidateImageContext {
+	const next: CandidateImageContext = {
+		rcid:
+			(typeof tuple[2] === "string" && tuple[2].startsWith("rc_")
+				? tuple[2]
+				: context.rcid) || "",
+	};
+	if (typeof tuple[0] === "string" && tuple[0]) next.cid = tuple[0];
+	else if (context.cid) next.cid = context.cid;
+	if (typeof tuple[1] === "string" && tuple[1]) next.rid = tuple[1];
+	else if (context.rid) next.rid = context.rid;
+	return next;
+}
+
+function isHistoryGeneratedImageEntry(value: unknown): boolean {
+	const url = stringAt(getNested(value, [0, 3, 3]));
+	return !!(url && /googleusercontent\.com/i.test(url));
+}
+
+function isResponseIdTuple(value: unknown): value is unknown[] {
+	return (
+		Array.isArray(value) &&
+		typeof value[0] === "string" &&
+		(value[0].startsWith("c_") || value[0].startsWith("cid_")) &&
+		typeof value[1] === "string" &&
+		(value[1].startsWith("r_") || value[1].startsWith("rid_"))
+	);
+}
+
+function isMediaToken(value: string): boolean {
+	return /^\$A[A-Za-z0-9+/=_-]{16,}$/.test(value);
+}
+
+function isMediaId(value: string): boolean {
+	return (
+		/^[a-z0-9]{12,24}$/.test(value) &&
+		/[a-z]/.test(value) &&
+		/\d/.test(value) &&
+		!value.startsWith("rc") &&
+		!value.startsWith("rid")
+	);
+}
+
+function collectStrings(raw: unknown, out: string[], depth: number): void {
+	if (depth > 8) return;
+	if (typeof raw === "string") {
+		if (raw) out.push(raw);
+		return;
+	}
+	if (!Array.isArray(raw)) return;
+	for (const item of raw) collectStrings(item, out, depth + 1);
 }
 
 function appendWebImages(

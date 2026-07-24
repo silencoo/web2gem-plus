@@ -176,7 +176,7 @@ export const cases = [
 					assert.equal(bytes.byteLength, multipart.contentLength);
 					assert.match(
 						multipart.contentType,
-						/^multipart\/form-data; boundary=----web2gem-/,
+						/^multipart\/form-data; boundary=----web2gem-plus-/,
 					);
 					assert.match(
 						text,

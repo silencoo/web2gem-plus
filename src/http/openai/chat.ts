@@ -25,6 +25,7 @@ import {
 	streamOpenAIChatPlain,
 	streamOpenAIChatWithToolSieve,
 } from "./chat-stream";
+import { parseRemoveWatermarkOption } from "./images-input";
 
 // POST /v1/chat/completions
 export async function handleChat(
@@ -265,6 +266,9 @@ async function handleImageGenerationChat(
 		);
 	}
 
+	const removeWatermark = parseRemoveWatermarkOption(req);
+	if ("response" in removeWatermark) return removeWatermark.response;
+
 	const logRequests = !!cfg.log_requests;
 	const prepareStart = logRequests ? nowMs() : 0;
 	const prepared = await prepareOpenAIImageGenerationCompletion(
@@ -303,7 +307,10 @@ async function handleImageGenerationChat(
 	const generationStart = logRequests ? nowMs() : 0;
 	let rich: CompletionRichOutput;
 	try {
-		rich = await provider.generateRich({ prompt, rm, fileRefs });
+		rich = await provider.generateRich(
+			{ prompt, rm, fileRefs },
+			{ removeWatermark: removeWatermark.removeWatermark },
+		);
 	} catch (e) {
 		if (logRequests)
 			logStage(cfg, "openai_chat_image_generate", {
