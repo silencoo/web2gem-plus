@@ -445,8 +445,6 @@ pnpm docker:smoke
 
 本项目 fork 自 [Guardinary/web2gem](https://github.com/Guardinary/web2gem)。所有上游行为与架构都来自该项目；本 fork 在其上加入定向增强（最显著的是可选的水印去除流水线）。
 
-[![LinuxDo](https://img.shields.io/badge/社区-LinuxDo-blue?style=for-the-badge)](https://linux.do/)
-
 - 去水印核心 vendored 自 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover)（详见 `src/gemini/client/watermark/vendor/`）。
 
 ## 许可证

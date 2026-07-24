@@ -445,8 +445,6 @@ Never commit Gemini cookies or API keys. Store secrets in Cloudflare Worker secr
 
 This project is a fork of [Guardinary/web2gem](https://github.com/Guardinary/web2gem). All upstream behavior and architecture originate there; this fork adds targeted enhancements (notably the optional watermark-removal pipeline).
 
-[![LinuxDo](https://img.shields.io/badge/Community-LinuxDo-blue?style=for-the-badge)](https://linux.do/)
-
 - Watermark removal core vendored from [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) (see `src/gemini/client/watermark/vendor/`).
 
 ## License
