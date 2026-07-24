@@ -23,16 +23,53 @@ export {
 } from "./config";
 export {
 	DEFAULT_GENERATED_IMAGE_HYDRATION_LIMITS,
+	PREFERRED_GENERATED_IMAGE_MIN_MAX_SIDE,
+	PREFERRED_GENERATED_IMAGE_MIN_PIXELS,
+	fullSizeResolveModesForImage,
 	generatedImageFetchHeaders,
 	generatedImagePreviewFetchUrls,
 	hydrateGeneratedImages,
+	isPreferredGeneratedImage,
+	readImageSize,
+	stripGoogleusercontentSizeSuffix,
 } from "./gemini/client/generated-images";
+export {
+	applyReverseAlphaBlend,
+	detectWatermarkConfig,
+	removeGeminiWatermark,
+	scoreWatermarkCandidate,
+	selectWatermarkPlacement,
+	watermarkConfigCandidates,
+	watermarkPosition,
+	cornerWatermarkCropRect,
+} from "./gemini/client/watermark";
+export {
+	GET_FULL_SIZE_IMAGE_RPCID,
+	buildFullSizeImageRpcPayload,
+	buildFullSizeUpscalePrompt,
+	extractBatchExecuteFrames,
+	fullSizeDownloadProbeUrls,
+	fullSizeDownloadTransformUrl,
+	fullSizeImageRefsFromParsed,
+	fullSizeSourcePath,
+	rewriteGoogleusercontentGgToRdGg,
+	resolveFullSizeGeneratedImageUrl,
+} from "./gemini/client/full-size-image";
+export {
+	CONVERSATION_HISTORY_RPCID,
+	buildConversationHistoryRpcPayload,
+	extractGeneratedImagesFromConversationHistory,
+	mergeConversationHistoryMediaIntoImages,
+	normalizeConversationId,
+} from "./gemini/client/conversation-history";
 export {
 	createGeminiCompletionProvider,
 	createGeminiCompletionProviderWithDependenciesForTest,
 } from "./gemini/completion-provider";
 export {
+	collectGeneratedImagesFromTree,
 	createStreamTextExtractor,
+	extractGeneratedImageMediaMeta,
 	stripArtifacts,
 } from "./gemini/client/parser";
 export {
