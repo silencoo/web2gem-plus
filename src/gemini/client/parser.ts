@@ -512,7 +512,10 @@ export function extractGeneratedImageMediaMeta(item: unknown): {
 		// Gemini generation media ids are short lowercase alphanumerics (e.g. bd48xubd48xubd48).
 		if (!mediaId && isMediaId(value)) mediaId = value;
 	}
-	return { mediaToken, mediaId };
+	const out: { mediaToken?: string; mediaId?: string } = {};
+	if (mediaToken !== undefined) out.mediaToken = mediaToken;
+	if (mediaId !== undefined) out.mediaId = mediaId;
+	return out;
 }
 
 /**

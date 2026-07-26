@@ -545,7 +545,7 @@ function isJpegBytes(bytes: Uint8Array): boolean {
 	);
 }
 
-function toClamped(data: Uint8Array): Uint8ClampedArray {
+function toClamped(data: ArrayBufferView): Uint8ClampedArray {
 	if (data instanceof Uint8ClampedArray) return data;
 	return new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength);
 }

@@ -291,9 +291,7 @@ export async function generateRich(
 							activeCfg,
 							parts.images,
 							undefined,
-							{
-								removeWatermark: options.removeWatermark,
-							},
+							options.removeWatermark === true ? { removeWatermark: true } : {},
 						);
 			return { text: parts.text, images };
 		} catch (e) {

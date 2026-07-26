@@ -206,7 +206,8 @@ async function fetchGeneratedImageBytes(
 			if (!debug.cdn) {
 				debug.cdn = `${fetched.width}x${fetched.height}/${fetched.byteLength}`;
 			}
-			if (best && isPreferredGeneratedImage(best)) {
+			if (!best) continue;
+			if (isPreferredGeneratedImage(best)) {
 				return withDebug(await finalizeFetchedImage(cfg, best, options));
 			}
 		} catch (e) {
@@ -214,10 +215,11 @@ async function fetchGeneratedImageBytes(
 			lastErr = e;
 		}
 	}
-	if (best && !debug.cdn) {
-		debug.cdn = `${best.width}x${best.height}/${best.byteLength}`;
-	} else if (best) {
-		debug.cdn = `${best.width}x${best.height}/${best.byteLength}`;
+	const winner = best as RawFetchedImage | null;
+	if (winner) {
+		debug.cdn = `${winner.width}x${winner.height}/${winner.byteLength}`;
+	} else if (!debug.cdn) {
+		debug.cdn = "none";
 	}
 
 	// StreamGenerate often omits `$AV`; load via hNvQHb only after a CDN baseline.
@@ -246,7 +248,9 @@ async function fetchGeneratedImageBytes(
 				fullSizeImage,
 				{
 					mode,
-					upscalePrompt: options.upscalePrompt,
+					...(options.upscalePrompt !== undefined
+						? { upscalePrompt: options.upscalePrompt }
+						: {}),
 				},
 			);
 			if (!fullSizeUrl) {
@@ -263,7 +267,8 @@ async function fetchGeneratedImageBytes(
 			debug.modeResults.push(
 				`${mode}=${fetched.width}x${fetched.height}/${fetched.byteLength}`,
 			);
-			if (best && isPreferredGeneratedImage(best)) {
+			if (!best) continue;
+			if (isPreferredGeneratedImage(best)) {
 				return withDebug(await finalizeFetchedImage(cfg, best, options));
 			}
 		} catch (e) {
@@ -277,7 +282,8 @@ async function fetchGeneratedImageBytes(
 		}
 	}
 
-	if (best) return withDebug(await finalizeFetchedImage(cfg, best, options));
+	if (best !== null)
+		return withDebug(await finalizeFetchedImage(cfg, best, options));
 	if (lastErr) throw lastErr;
 	throw upstreamImageFetchFailedError("no generated image URL candidates");
 }
@@ -431,8 +437,8 @@ export function readImageSize(
 	}
 	if (bytes.length >= 10 && isGif(bytes)) {
 		return {
-			width: bytes[6] | (bytes[7] << 8),
-			height: bytes[8] | (bytes[9] << 8),
+			width: (bytes[6] ?? 0) | ((bytes[7] ?? 0) << 8),
+			height: (bytes[8] ?? 0) | ((bytes[9] ?? 0) << 8),
 		};
 	}
 	if (bytes.length >= 30 && isWebp(bytes)) {
@@ -583,16 +589,24 @@ function readJpegSize(
 ): { width: number; height: number } | null {
 	let offset = 2;
 	while (offset + 9 < bytes.length) {
-		if (bytes[offset] !== 0xff) return null;
-		const marker = bytes[offset + 1];
+		const b0 = bytes[offset];
+		const b1 = bytes[offset + 1];
+		const b2 = bytes[offset + 2];
+		const b3 = bytes[offset + 3];
+		const b5 = bytes[offset + 5];
+		const b6 = bytes[offset + 6];
+		const b7 = bytes[offset + 7];
+		const b8 = bytes[offset + 8];
+		if (b0 !== 0xff) return null;
+		const marker = b1;
 		if (marker === 0xd9 || marker === 0xda) return null;
-		if (marker >= 0xc0 && marker <= 0xc3) {
+		if (marker !== undefined && marker >= 0xc0 && marker <= 0xc3) {
 			return {
-				height: (bytes[offset + 5] << 8) | bytes[offset + 6],
-				width: (bytes[offset + 7] << 8) | bytes[offset + 8],
+				height: ((b5 ?? 0) << 8) | (b6 ?? 0),
+				width: ((b7 ?? 0) << 8) | (b8 ?? 0),
 			};
 		}
-		const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+		const length = ((b2 ?? 0) << 8) | (b3 ?? 0);
 		if (length < 2) return null;
 		offset += 2 + length;
 	}
@@ -610,8 +624,12 @@ function readWebpSize(
 		bytes[14] === 0x38 &&
 		bytes[15] === 0x58
 	) {
-		const width = 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16));
-		const height = 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16));
+		const width =
+			1 +
+			((bytes[24] ?? 0) | ((bytes[25] ?? 0) << 8) | ((bytes[26] ?? 0) << 16));
+		const height =
+			1 +
+			((bytes[27] ?? 0) | ((bytes[28] ?? 0) << 8) | ((bytes[29] ?? 0) << 16));
 		return { width, height };
 	}
 	// VP8 lossy
@@ -623,8 +641,8 @@ function readWebpSize(
 		bytes[15] === 0x20
 	) {
 		return {
-			width: bytes[26] | ((bytes[27] & 0x3f) << 8),
-			height: bytes[28] | ((bytes[29] & 0x3f) << 8),
+			width: (bytes[26] ?? 0) | (((bytes[27] ?? 0) & 0x3f) << 8),
+			height: (bytes[28] ?? 0) | (((bytes[29] ?? 0) & 0x3f) << 8),
 		};
 	}
 	// VP8L lossless
@@ -636,7 +654,10 @@ function readWebpSize(
 		bytes[15] === 0x4c
 	) {
 		const bits =
-			bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24);
+			(bytes[21] ?? 0) |
+			((bytes[22] ?? 0) << 8) |
+			((bytes[23] ?? 0) << 16) |
+			((bytes[24] ?? 0) << 24);
 		return {
 			width: (bits & 0x3fff) + 1,
 			height: ((bits >> 14) & 0x3fff) + 1,
@@ -647,10 +668,10 @@ function readWebpSize(
 
 function readU32BE(bytes: Uint8Array, offset: number): number {
 	return (
-		((bytes[offset] << 24) |
-			(bytes[offset + 1] << 16) |
-			(bytes[offset + 2] << 8) |
-			bytes[offset + 3]) >>>
+		(((bytes[offset] ?? 0) << 24) |
+			((bytes[offset + 1] ?? 0) << 16) |
+			((bytes[offset + 2] ?? 0) << 8) |
+			(bytes[offset + 3] ?? 0)) >>>
 		0
 	);
 }
