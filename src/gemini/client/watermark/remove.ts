@@ -168,9 +168,7 @@ export function scoreWatermarkCandidate(
 	return cov / Math.sqrt(varA * varE);
 }
 
-export function selectWatermarkPlacement(
-	_image: RgbaImage,
-): {
+export function selectWatermarkPlacement(_image: RgbaImage): {
 	config: WatermarkConfig;
 	position: { x: number; y: number; width: number; height: number };
 	score: number;
@@ -248,8 +246,7 @@ export async function removeGeminiWatermark(
 		},
 		adaptiveMode: "always",
 		getAlphaMap: (size: number | string) =>
-			engine.alphaMaps[size] ||
-			interpolateAlphaMap(alpha96, 96, Number(size)),
+			engine.alphaMaps[size] || interpolateAlphaMap(alpha96, 96, Number(size)),
 	});
 
 	if (result?.meta?.applied === true) removed = true;

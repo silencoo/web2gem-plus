@@ -606,7 +606,11 @@ export const cases = [
 			assert.deepEqual(
 				mod.extractGeneratedImageMediaMeta([
 					[{}, ["http://googleusercontent.com/image_generation_content/1"]],
-					["$AVtesttoken0123456789abcdefghijk", "bd48xubd48xubd48", "image/png"],
+					[
+						"$AVtesttoken0123456789abcdefghijk",
+						"bd48xubd48xubd48",
+						"image/png",
+					],
 				]),
 				{
 					mediaToken: "$AVtesttoken0123456789abcdefghijk",
@@ -619,51 +623,51 @@ export const cases = [
 			const secondaryMeta = [];
 			secondaryMeta[3] = "https://lh3.googleusercontent.com/gg/preview-b";
 			secondaryMeta[5] = "$AVsecondarytoken0123456789abcdef";
-			const historyEntry = [[null, null, null, primaryMeta, secondaryMeta], ["http://googleusercontent.com/image_generation_content/364"]];
+			const historyEntry = [
+				[null, null, null, primaryMeta, secondaryMeta],
+				["http://googleusercontent.com/image_generation_content/364"],
+			];
 			assert.equal(
 				mod.extractGeneratedImageMediaMeta(historyEntry).mediaToken,
 				"$AVprimarytoken0123456789abcdefgh",
 			);
-			assert.equal(mod.normalizeConversationId("c8098be7357bbc2c"), "c_c8098be7357bbc2c");
+			assert.equal(
+				mod.normalizeConversationId("c8098be7357bbc2c"),
+				"c_c8098be7357bbc2c",
+			);
 			assert.equal(
 				mod.normalizeConversationId("c_c8098be7357bbc2c"),
 				"c_c8098be7357bbc2c",
 			);
-			assert.deepEqual(mod.buildConversationHistoryRpcPayload("c8098be7357bbc2c"), [
-				"c_c8098be7357bbc2c",
-				10,
-				null,
-				1,
-				[0],
-				[4],
-				null,
-				1,
-			]);
-			assert.deepEqual(mod.fullSizeResolveModesForImage({
-				url: "https://lh3.googleusercontent.com/gg/x",
-				source: "generated",
-				mediaToken: "$AVtoken",
-			}), [20, 19]);
-			assert.deepEqual(mod.fullSizeResolveModesForImage({
-				url: "https://lh3.googleusercontent.com/gg/x",
-				source: "generated",
-			}), [19]);
+			assert.deepEqual(
+				mod.buildConversationHistoryRpcPayload("c8098be7357bbc2c"),
+				["c_c8098be7357bbc2c", 10, null, 1, [0], [4], null, 1],
+			);
+			assert.deepEqual(
+				mod.fullSizeResolveModesForImage({
+					url: "https://lh3.googleusercontent.com/gg/x",
+					source: "generated",
+					mediaToken: "$AVtoken",
+				}),
+				[20, 19],
+			);
+			assert.deepEqual(
+				mod.fullSizeResolveModesForImage({
+					url: "https://lh3.googleusercontent.com/gg/x",
+					source: "generated",
+				}),
+				[19],
+			);
 
 			const historyInner = [
-				[
-					[
-						"c_c8098be7357bbc2c",
-						"r_1",
-						"rc_1",
-						historyEntry,
-					],
-				],
+				[["c_c8098be7357bbc2c", "r_1", "rc_1", historyEntry]],
 			];
 			const historyPayload = JSON.stringify([
 				["wrb.fr", "hNvQHb", JSON.stringify(historyInner)],
 			]);
 			const historyBody = `)]}'\n${historyPayload.length}\n${historyPayload}`;
-			const fromHistory = mod.extractGeneratedImagesFromConversationHistory(historyBody);
+			const fromHistory =
+				mod.extractGeneratedImagesFromConversationHistory(historyBody);
 			assert.equal(fromHistory.length >= 1, true);
 			assert.equal(
 				fromHistory[0].mediaToken,
@@ -678,7 +682,8 @@ export const cases = [
 					{
 						url: "https://lh3.googleusercontent.com/gg/preview-a?alr=yes",
 						source: "generated",
-						imageId: "http://googleusercontent.com/image_generation_content/364",
+						imageId:
+							"http://googleusercontent.com/image_generation_content/364",
 						cid: "c_c8098be7357bbc2c",
 					},
 				],
@@ -700,18 +705,23 @@ export const cases = [
 					{
 						url: "https://lh3.googleusercontent.com/gg/old",
 						source: "generated",
-						imageId: "http://googleusercontent.com/image_generation_content/100",
+						imageId:
+							"http://googleusercontent.com/image_generation_content/100",
 						mediaToken: "$AVoldtoken0123456789abcdefghijkl",
 					},
 					{
 						url: "https://lh3.googleusercontent.com/gg/new",
 						source: "generated",
-						imageId: "http://googleusercontent.com/image_generation_content/364",
+						imageId:
+							"http://googleusercontent.com/image_generation_content/364",
 						mediaToken: "$AVnewtoken0123456789abcdefghijkl",
 					},
 				],
 			);
-			assert.equal(mismatched[0].mediaToken, "$AVnewtoken0123456789abcdefghijkl");
+			assert.equal(
+				mismatched[0].mediaToken,
+				"$AVnewtoken0123456789abcdefghijkl",
+			);
 			assert.equal(
 				mismatched[0].imageId,
 				"http://googleusercontent.com/image_generation_content/364",
@@ -761,7 +771,7 @@ export const cases = [
 				async (url, init) => {
 					const target = String(url);
 					calls.push(target);
-					if (target.includes("/app") && (!init || init.method !== "POST")) {
+					if (target.includes("/app") && init?.method !== "POST") {
 						return new Response(
 							'{"SNlM0e":"at-test","FdrFJe":"sid-test","qKIAYe":"push"}',
 							{ status: 200 },
@@ -867,7 +877,7 @@ export const cases = [
 				async (url, init) => {
 					const target = String(url);
 					calls.push(target);
-					if (target.includes("/app") && (!init || init.method !== "POST")) {
+					if (target.includes("/app") && init?.method !== "POST") {
 						return new Response(
 							'{"SNlM0e":"at-test","FdrFJe":"sid-test","qKIAYe":"push"}',
 							{ status: 200 },
@@ -898,7 +908,9 @@ export const cases = [
 							{ status: 200, headers: { "content-type": "text/plain" } },
 						);
 					}
-					if (target === "https://lh3.googleusercontent.com/full-final-2k.jpg") {
+					if (
+						target === "https://lh3.googleusercontent.com/full-final-2k.jpg"
+					) {
 						return new Response(fullPng, {
 							status: 200,
 							headers: { "content-type": "image/png" },
@@ -953,10 +965,7 @@ export const cases = [
 				previewCandidates[1],
 				"https://lh3.googleusercontent.com/generated=s2048-rj",
 			);
-			assert.equal(
-				previewCandidates.includes(previewUrl),
-				true,
-			);
+			assert.equal(previewCandidates.includes(previewUrl), true);
 			assert.equal(
 				mod.stripGoogleusercontentSizeSuffix(previewUrl),
 				"https://lh3.googleusercontent.com/generated",
@@ -977,7 +986,10 @@ export const cases = [
 			const alreadyLarge =
 				"https://lh3.googleusercontent.com/generated=s2048-rj";
 			const largeCandidates = mod.generatedImagePreviewFetchUrls(alreadyLarge);
-			assert.equal(largeCandidates[0], "https://lh3.googleusercontent.com/generated=s4096-rj");
+			assert.equal(
+				largeCandidates[0],
+				"https://lh3.googleusercontent.com/generated=s4096-rj",
+			);
 			assert.equal(largeCandidates.includes(alreadyLarge), true);
 
 			assert.equal(
@@ -1088,10 +1100,13 @@ export const cases = [
 					assert.equal(rich.images.length, 1);
 					assert.equal(rich.images[0].url, imageUrl);
 					assert.equal(rich.images[0].outputFormat, "png");
-					assert.deepEqual(mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)), {
-						width: 2048,
-						height: 2048,
-					});
+					assert.deepEqual(
+						mod.readImageSize(mod.base64ToBytes(rich.images[0].base64)),
+						{
+							width: 2048,
+							height: 2048,
+						},
+					);
 				},
 			);
 			assert.match(
