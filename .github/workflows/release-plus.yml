@@ -188,7 +188,7 @@ jobs:
       - name: Checkout release revision
         uses: actions/checkout@v5
         with:
-          ref: ${RELEASE_REVISION}
+          ref: ${{ env.RELEASE_REVISION }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
