@@ -1,4 +1,4 @@
-export const VERSION = "1.1.1-worker";
+export const VERSION = "1.1.0-worker";
 
 export type WorkerEnv = Partial<Record<keyof WorkerBindings, unknown>>;
 
