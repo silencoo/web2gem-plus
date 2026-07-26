@@ -116,7 +116,7 @@ export function parseOptionalRequestBoolean(
 	return invalidBooleanResponse(fieldName);
 }
 
-/** Parse `remove_watermark` (default true when omitted). */
+/** Parse `remove_watermark` (default false when omitted — avoids Workers CPU 1102 on full-size). */
 export function parseRemoveWatermarkOption(
 	req: UnknownRecord,
 ): { removeWatermark: boolean } | { response: Response } {
@@ -125,7 +125,7 @@ export function parseRemoveWatermarkOption(
 		"remove_watermark",
 	);
 	if ("response" in parsed) return parsed;
-	return { removeWatermark: parsed.value !== false };
+	return { removeWatermark: parsed.value === true };
 }
 
 function invalidBooleanResponse(fieldName: string): { response: Response } {

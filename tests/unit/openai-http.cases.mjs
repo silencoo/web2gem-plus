@@ -1500,12 +1500,12 @@ export const cases = [
 			assert.equal(String(body.data[0].url).startsWith("/images/"), false);
 			assert.deepEqual(generateOptions, {
 				hydrateGeneratedImageBytes: false,
-				removeWatermark: true,
+				removeWatermark: false,
 			});
 		},
 	],
 	[
-		"forwards remove_watermark=false on OpenAI Images generations",
+		"forwards remove_watermark=true on OpenAI Images generations",
 		async () => {
 			let generateOptions = null;
 			const resp = await mod.handleImageGenerations(
@@ -1513,7 +1513,7 @@ export const cases = [
 					model: "gemini-3.5-flash",
 					prompt: "draw a cat",
 					response_format: "b64_json",
-					remove_watermark: false,
+					remove_watermark: true,
 				},
 				baseConfig({ cookie: "SID=ok" }),
 				fakeProvider({
@@ -1536,7 +1536,7 @@ export const cases = [
 			assert.equal(resp.status, 200);
 			assert.deepEqual(generateOptions, {
 				hydrateGeneratedImageBytes: true,
-				removeWatermark: false,
+				removeWatermark: true,
 			});
 		},
 	],

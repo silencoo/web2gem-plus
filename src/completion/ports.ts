@@ -33,7 +33,7 @@ export type CompletionProviderOptions = {
 
 export type CompletionRichOptions = {
 	hydrateGeneratedImageBytes?: boolean;
-	/** When false, skip Gemini watermark scrub on hydrated image bytes (default true). */
+	/** When true, run Gemini watermark scrub on hydrated image bytes (default false). */
 	removeWatermark?: boolean;
 };
 

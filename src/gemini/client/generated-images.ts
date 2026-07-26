@@ -28,7 +28,7 @@ export type GeneratedImageHydrationLimits = {
 export type GeneratedImageHydrationOptions = {
 	/** Forwarded into c8o8Fe mode-20 upscale payload. */
 	upscalePrompt?: string;
-	/** When false, skip Gemini watermark scrub on the winning image (default true). */
+	/** When true, scrub Gemini watermark on the winning image (default false). */
 	removeWatermark?: boolean;
 };
 
@@ -340,9 +340,9 @@ async function finalizeFetchedImage(
 ): Promise<FetchedImageBytes> {
 	try {
 		const cleaned =
-			options.removeWatermark === false
-				? null
-				: await maybeRemoveGeneratedImageWatermark(cfg, image.bytes);
+			options.removeWatermark === true
+				? await maybeRemoveGeneratedImageWatermark(cfg, image.bytes)
+				: null;
 		const finalBytes = cleaned?.bytes ?? image.bytes;
 		const finalFormat = cleaned?.format ?? image.outputFormat;
 		const width = cleaned?.width ?? image.width;

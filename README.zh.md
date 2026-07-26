@@ -80,7 +80,7 @@
 | 结构化输出                 | 对非流式结构化响应执行最终 JSON 校验和规范化；默认拒绝流式结构化输出。                                                                            |
 | 大上下文处理               | 配置 `GEMINI_COOKIE` 后，可将大段提示上下文作为 Gemini 文本附件上传，而不是全部以内联文本发送。                                                    |
 | 生图                       | 支持非流式 Chat/Responses 请求中的显式 OpenAI `image_generation` 元数据，以及 `/v1/images/generations`、`/v1/images/edits`；需要配置 Gemini cookie。 |
-| 自动去水印                 | 可选。基于 [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) 反向 Alpha 混合，在网页全尺寸下载链路之后只处理右下角裁剪区域。Cloudflare Workers 上对 ~2K+ 整图全幅扫描常会触发 CPU 超限（Error 1102）。只要分辨率时可设 `"remove_watermark": false`，或用 GargantuaX / 浏览器扩展离线去水印。默认仍为 `true`，对较小预览级图片更合适。 |
+| 自动去水印                 | 可选开启。基于 [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) 反向 Alpha 混合，在网页全尺寸下载链路之后只处理右下角裁剪区域。**默认 `remove_watermark: false`**（保留角标），避免 full-size ~2K 在 Workers 上触发 CPU 超限（Error 1102）。需要去水印时传 `"remove_watermark": true`，或用 GargantuaX / 浏览器扩展离线处理。 |
 | 图片输入处理               | 通过 Gemini provider 路径解析用户提供的内联/base64 图片；Worker 不抓取远程图片或文件 URL。                                                        |
 | 通用文件附件               | 配置 Gemini cookie 后，请求内 `input_file` 和非图片内联数据可使用 Gemini Web 上传引用，支持任意文件名和 MIME；不实现持久化 `/v1/files` 服务。     |
 | Worker 和 Docker 部署      | 可将 Worker bundle 部署到 Cloudflare Workers，也可用 Docker / Docker Compose 自托管；`main` 的两种模式都不需要账号数据库。                        |
@@ -175,9 +175,9 @@ curl https://your-web2gem-plus.example/v1/images/generations \
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `remove_watermark` | `true` | 为 `true` 时在 hydration 后去除角标水印；为 `false` 时原样返回全尺寸下载字节（保留水印）。Chat / Responses 生图与 multipart 编辑同样支持。 |
+| `remove_watermark` | `false` | 为 `true` 时在 hydration 后去除角标水印；省略/`false` 时原样返回全尺寸下载字节（保留水印）。Chat / Responses 生图与 multipart 编辑同样支持。 |
 
-Hydration 优先走 Gemini 网页全尺寸下载链（`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`），才能拿到多 MB 的约 2K 资源。去水印是另一步 CPU 密集处理：早期「小图去水印效果怪」往往是因为只拿到了 **CDN 预览**（约 1MP），而不是去水印算法本身坏了。Workers 上大图建议 `"remove_watermark": false`，需要时用 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) 本地处理。Paid 计划可把 `limits.cpu_ms` 提到最高 5 分钟，以便在 Worker 内处理更大图。
+Hydration 优先走 Gemini 网页全尺寸下载链（`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`），才能拿到多 MB 的约 2K 资源。Worker 内去水印 CPU 很重，大图上常触发默认 CPU 限额（Error 1102），因此**默认关闭**。需要时传 `"remove_watermark": true`，或用 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) 本地处理。Paid 计划可把 `limits.cpu_ms` 提到最高 5 分钟，以便开启 Worker 内大图去水印。
 
 ```sh
 curl https://your-web2gem-plus.example/v1/images/generations \
@@ -187,7 +187,7 @@ curl https://your-web2gem-plus.example/v1/images/generations \
     "model": "gemini-3.5-flash",
     "prompt": "生成一张风景照片。",
     "response_format": "b64_json",
-    "remove_watermark": false
+    "remove_watermark": true
   }'
 ```
 

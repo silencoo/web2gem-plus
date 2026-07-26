@@ -80,7 +80,7 @@ Choose `main` if you want the simplest deployment and do not need a persistent a
 | Structured output            | Validates and canonicalizes final JSON for non-streaming structured responses; streaming structured output is rejected by default.              |
 | Large context handling       | With `GEMINI_COOKIE` configured, large prompt context can be uploaded as Gemini text attachments instead of remaining entirely inline.           |
 | Image generation             | Supports explicit OpenAI `image_generation` metadata for non-streaming Chat/Responses requests, plus `/v1/images/generations` and `/v1/images/edits`; a Gemini cookie is required. |
-| Watermark removal            | Optional. Uses [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) reverse-alpha blending on a **bottom-right corner crop** after the web full-size download path. On Cloudflare Workers, full-frame scrub of ~2K+ assets often exceeds the default CPU budget (Error 1102). Prefer `"remove_watermark": false` when you only need max resolution, or scrub offline with GargantuaX / the browser extension. Default remains `true` for smaller preview-class images. |
+| Watermark removal            | Optional opt-in. Uses [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) reverse-alpha blending on a **bottom-right corner crop** after the web full-size download path. **Default `remove_watermark: false`** (keeps the Gemini sparkle) so full-size ~2K downloads do not hit Workers CPU Error 1102. Pass `"remove_watermark": true` to scrub in-Worker, or scrub offline with GargantuaX / the browser extension. |
 | Image input handling         | Resolves user-provided inline/base64 images through the Gemini provider path. The Worker does not fetch remote image or file URLs.                |
 | Generic file attachments     | With a Gemini cookie, request-local `input_file` and inline non-image data can use Gemini Web upload references with arbitrary filenames and MIME types; persistent `/v1/files` storage is not implemented. |
 | Worker and Docker deployment | Deploy the Worker bundle to Cloudflare Workers or self-host with Docker / Docker Compose; neither mode requires an account database on `main`.   |
@@ -175,9 +175,9 @@ Optional image fields:
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `remove_watermark` | `true` | When `true`, scrub Gemini corner sparkles after hydration. When `false`, return the full-size bytes as downloaded (watermark kept). Also accepted on Chat / Responses image-generation requests and multipart edits. |
+| `remove_watermark` | `false` | When `true`, scrub Gemini corner sparkles after hydration. When omitted/`false`, return the full-size bytes as downloaded (watermark kept). Also accepted on Chat / Responses image-generation requests and multipart edits. |
 
-Hydration prefers Gemini’s web full-size download chain (`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`), which is what yields multi‑MB ~2K assets. Watermark scrubbing is a separate CPU-heavy step: early “watermark looks wrong on small images” cases were often **preview CDN** downloads (~1MP), not a broken scrubber. For large full-size outputs on Workers, use `"remove_watermark": false` and remove the sparkle locally with [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) if needed. Paid Workers can raise `limits.cpu_ms` (up to 5 minutes) if you want in-Worker scrubbing of larger assets.
+Hydration prefers Gemini’s web full-size download chain (`c8o8Fe` + `=s0-d-I?alr=yes` / `/rd-gg/`), which is what yields multi‑MB ~2K assets. In-Worker watermark scrubbing is CPU-heavy and often exceeds the default Workers budget on those assets (Error 1102), so it is **off by default**. Pass `"remove_watermark": true` only when you want scrubbing, or remove the sparkle locally with [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover). Paid Workers can raise `limits.cpu_ms` (up to 5 minutes) if you enable in-Worker scrubbing of larger assets.
 
 ```sh
 curl https://your-web2gem-plus.example/v1/images/generations \
@@ -187,7 +187,7 @@ curl https://your-web2gem-plus.example/v1/images/generations \
     "model": "gemini-3.5-flash",
     "prompt": "Generate a landscape photo.",
     "response_format": "b64_json",
-    "remove_watermark": false
+    "remove_watermark": true
   }'
 ```
 

@@ -54,7 +54,7 @@ type GeminiStreamOptions = {
 
 type GeminiRichOptions = {
 	hydrateGeneratedImageBytes?: boolean;
-	/** When false, skip Gemini watermark scrub (default true). */
+	/** When true, run Gemini watermark scrub (default false). */
 	removeWatermark?: boolean;
 };
 
