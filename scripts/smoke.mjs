@@ -1,16 +1,7 @@
 const prod = await import("../dist/worker.js");
 const testMod = await import("../dist/worker.test.js");
 
-const expectedProductionExports = [
-	"MODELS",
-	"VERSION",
-	"default",
-	"generate",
-	"generateStream",
-	"getConfig",
-	"parseToolCalls",
-	"resolveModel",
-];
+const expectedProductionExports = ["GeminiSessionPool", "default"];
 
 const productionExports = Object.keys(prod).sort();
 const missingProductionExports = expectedProductionExports.filter(
@@ -38,10 +29,7 @@ if (missingProductionExports.length || unexpectedProductionExports.length) {
 
 const checks = [
 	["default.fetch", prod.default && typeof prod.default.fetch === "function"],
-	["MODELS", prod.MODELS && typeof prod.MODELS === "object"],
-	["resolveModel", typeof prod.resolveModel === "function"],
-	["getConfig", typeof prod.getConfig === "function"],
-	["parseToolCalls", typeof prod.parseToolCalls === "function"],
+	["GeminiSessionPool", typeof prod.GeminiSessionPool === "function"],
 	["test.buildPayload", typeof testMod.buildPayload === "function"],
 	[
 		"test.buildToolCallInstructions",
@@ -212,7 +200,7 @@ if (!toolInstructions.includes("Read-tool cache guard")) {
 	process.exit(1);
 }
 
-const [, toolCalls] = prod.parseToolCalls(
+const [, toolCalls] = testMod.parseToolCalls(
 	'<|DSML|tool_calls><|DSML|invoke name="Read"><|DSML|parameter name="file_path"><![CDATA[README.md]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>',
 );
 if (!toolCalls.length || toolCalls[0].function.name !== "Read") {

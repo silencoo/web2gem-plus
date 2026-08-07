@@ -11,6 +11,7 @@ import {
 	isLargePromptEmptyResponseError,
 	largePromptEmptyResponseError,
 	largePromptEmptyResponseThreshold,
+	safeRedirectTarget,
 	upstreamImageGenerationEmptyError,
 	upstreamImageProviderError,
 	upstreamEmptyResponseError,
@@ -33,7 +34,9 @@ import {
 } from "./retry";
 import {
 	configWithFreshGeminiCookie,
+	markGeminiSessionSuccess,
 	rotateGeminiCookieForRetryWithReason,
+	switchGeminiSessionForRetry,
 } from "../cookies";
 import type { RuntimeConfig } from "../../config";
 import type { ErrorWithMetadata } from "../../shared/types";
@@ -58,6 +61,11 @@ type GeminiRichOptions = {
 	removeWatermark?: boolean;
 };
 
+type AccountRetryTracker = {
+	attempts: number;
+	readonly attemptedAccountIds: Set<string>;
+};
+
 export type { GeminiRichImage } from "./generated-images";
 
 export type GeminiRichOutput = {
@@ -75,6 +83,7 @@ export {
 } from "./parser";
 export { buildHeaders, buildPayload, getUrl } from "./protocol";
 export { getFreshGeminiBuildLabel } from "./retry";
+export { safeRedirectTarget } from "./errors";
 
 async function appendGeminiPageToken(
 	cfg: RuntimeConfig,
@@ -97,9 +106,13 @@ async function fetchGeminiStreamGenerate(
 	modelHeaders: Record<string, string> | null = null,
 	requestId: string | null = null,
 ) {
-	const url = getUrl(activeCfg);
-	const headers = await buildHeaders(activeCfg, modelHeaders, requestId);
 	const requestBody = await appendGeminiPageToken(activeCfg, body);
+	// `/app` supplies both the page auth token and Gemini's current build label.
+	// Re-read the cache after token discovery so a cold Worker never sends its
+	// first RPC with the older configured fallback label.
+	const requestCfg = await configWithCachedGeminiBuildLabel(activeCfg);
+	const url = getUrl(requestCfg);
+	const headers = await buildHeaders(requestCfg, modelHeaders, requestId);
 	return httpFetch(url, {
 		method: "POST",
 		headers,
@@ -108,8 +121,77 @@ async function fetchGeminiStreamGenerate(
 		socket: cfg.upstream_socket,
 		socketFallback: "never",
 		signal,
-		cfg,
+		cfg: requestCfg,
 	});
+}
+
+function upstreamResponseContext(
+	resp: { headers: Headers },
+	activeCfg: RuntimeConfig,
+	context: string,
+): string {
+	const redirect = safeRedirectTarget(
+		resp.headers.get("location"),
+		activeCfg.gemini_origin,
+	);
+	return redirect ? `${context}; redirect=${redirect}` : context;
+}
+
+function createAccountRetryTracker(
+	activeCfg: RuntimeConfig,
+): AccountRetryTracker {
+	return {
+		attempts: activeCfg.gemini_session ? 1 : 0,
+		attemptedAccountIds: new Set<string>(),
+	};
+}
+
+function accountRetrySafetyLimit(cfg: RuntimeConfig): number {
+	return cfg.retry_attempts + accountMaxAttempts(cfg) * 2 + 2;
+}
+
+function accountMaxAttempts(cfg: RuntimeConfig): number {
+	const value = Number(cfg.gemini_account_max_attempts);
+	return Number.isSafeInteger(value) && value > 0 ? value : 10;
+}
+
+async function trySwitchPooledAccount(
+	activeCfg: RuntimeConfig,
+	tracker: AccountRetryTracker,
+	issue: "auth" | "rate_limit" | "transient" | null,
+): Promise<RuntimeConfig | null> {
+	const currentId = activeCfg.gemini_session?.account_id;
+	if (
+		!currentId ||
+		!activeCfg.gemini_session_pool ||
+		tracker.attempts >= accountMaxAttempts(activeCfg)
+	)
+		return null;
+	tracker.attemptedAccountIds.add(currentId);
+	const switched = await switchGeminiSessionForRetry(
+		activeCfg,
+		[...tracker.attemptedAccountIds],
+		issue,
+	);
+	if (!switched) return null;
+	tracker.attempts++;
+	return configWithCachedGeminiBuildLabel(switched);
+}
+
+function pooledFailureIssue(error: unknown): "rate_limit" | "transient" | null {
+	if (!error || typeof error !== "object") return null;
+	const metadata = error as Partial<ErrorWithMetadata>;
+	if (
+		metadata.code === "request_aborted" ||
+		metadata.code === "large_prompt_empty_response" ||
+		metadata.code === "data_analysis_empty_response" ||
+		metadata.code === "upstream_image_provider_error"
+	)
+		return null;
+	const status = Number(metadata.upstreamStatus ?? metadata.status);
+	if (status === 402 || status === 429) return "rate_limit";
+	if (status >= 500 && status <= 599) return "transient";
+	return null;
 }
 
 export async function generate(
@@ -127,6 +209,8 @@ export async function generate(
 	);
 	let refreshedBL = false;
 	let refreshedCookie = false;
+	let retryAttempt = 0;
+	const accountRetry = createAccountRetryTracker(activeCfg);
 	const requestId = uuid().toUpperCase();
 	const body = buildPayload(
 		prompt,
@@ -136,7 +220,11 @@ export async function generate(
 		extra,
 		requestId,
 	);
-	for (let attempt = 0; attempt < cfg.retry_attempts; attempt++) {
+	for (
+		let safetyAttempt = 0;
+		safetyAttempt < accountRetrySafetyLimit(cfg);
+		safetyAttempt++
+	) {
 		try {
 			const resp = await fetchGeminiStreamGenerate(
 				cfg,
@@ -179,8 +267,13 @@ export async function generate(
 					activeCfg = refreshedCfg;
 					continue;
 				}
-				throw upstreamEmptyResponseError(resp.status, raw.length, "non-stream");
+				throw upstreamEmptyResponseError(
+					resp.status,
+					raw.length,
+					upstreamResponseContext(resp, activeCfg, "non-stream"),
+				);
 			}
+			await markGeminiSessionSuccess(activeCfg);
 			return text;
 		} catch (e) {
 			if (isInvalidGeminiCookieError(e) && !refreshedCookie) {
@@ -190,18 +283,54 @@ export async function generate(
 					activeCfg = await configWithCachedGeminiBuildLabel(rotated.config);
 					continue;
 				}
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					rotated.reason === "recent_rotation" ? null : "auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, rotated.reason);
 			}
-			if (isInvalidGeminiCookieError(e) && refreshedCookie)
+			if (isInvalidGeminiCookieError(e) && refreshedCookie) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					"auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, "rotation_updated");
+			}
 			if (
 				isLargePromptEmptyResponseError(e) ||
 				isDataAnalysisEmptyResponseError(e) ||
 				isInvalidGeminiCookieError(e)
 			)
 				throw e;
+			const poolIssue = pooledFailureIssue(e);
+			if (poolIssue) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					poolIssue,
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
+			}
 			lastErr = e;
-			await waitBeforeRetry(cfg, attempt, e, "Retry");
+			retryAttempt++;
+			if (retryAttempt >= cfg.retry_attempts) break;
+			await waitBeforeRetry(cfg, retryAttempt - 1, e, "Retry");
 		}
 	}
 	throw lastErr;
@@ -223,6 +352,8 @@ export async function generateRich(
 	);
 	let refreshedBL = false;
 	let refreshedCookie = false;
+	let retryAttempt = 0;
+	const accountRetry = createAccountRetryTracker(activeCfg);
 	const requestId = uuid().toUpperCase();
 	const body = buildPayload(
 		prompt,
@@ -232,7 +363,11 @@ export async function generateRich(
 		extra,
 		requestId,
 	);
-	for (let attempt = 0; attempt < cfg.retry_attempts; attempt++) {
+	for (
+		let safetyAttempt = 0;
+		safetyAttempt < accountRetrySafetyLimit(cfg);
+		safetyAttempt++
+	) {
 		try {
 			const resp = await fetchGeminiStreamGenerate(
 				cfg,
@@ -280,7 +415,7 @@ export async function generateRich(
 				throw upstreamImageGenerationEmptyError(
 					resp.status,
 					raw.length,
-					"non-stream",
+					upstreamResponseContext(resp, activeCfg, "non-stream"),
 				);
 			}
 			const images =
@@ -293,6 +428,7 @@ export async function generateRich(
 							undefined,
 							options.removeWatermark === true ? { removeWatermark: true } : {},
 						);
+			await markGeminiSessionSuccess(activeCfg);
 			return { text: parts.text, images };
 		} catch (e) {
 			if (isInvalidGeminiCookieError(e) && !refreshedCookie) {
@@ -302,18 +438,54 @@ export async function generateRich(
 					activeCfg = await configWithCachedGeminiBuildLabel(rotated.config);
 					continue;
 				}
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					rotated.reason === "recent_rotation" ? null : "auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, rotated.reason);
 			}
-			if (isInvalidGeminiCookieError(e) && refreshedCookie)
+			if (isInvalidGeminiCookieError(e) && refreshedCookie) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					"auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, "rotation_updated");
+			}
 			if (
 				isLargePromptEmptyResponseError(e) ||
 				isDataAnalysisEmptyResponseError(e) ||
 				isInvalidGeminiCookieError(e)
 			)
 				throw e;
+			const poolIssue = pooledFailureIssue(e);
+			if (poolIssue) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					poolIssue,
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
+			}
 			lastErr = e;
-			await waitBeforeRetry(cfg, attempt, e, "Rich retry");
+			retryAttempt++;
+			if (retryAttempt >= cfg.retry_attempts) break;
+			await waitBeforeRetry(cfg, retryAttempt - 1, e, "Rich retry");
 		}
 	}
 	throw lastErr;
@@ -336,6 +508,8 @@ export async function* generateStream(
 	);
 	let refreshedBL = false;
 	let refreshedCookie = false;
+	let retryAttempt = 0;
+	const accountRetry = createAccountRetryTracker(activeCfg);
 	const requestId = uuid().toUpperCase();
 	const body = buildPayload(
 		prompt,
@@ -347,7 +521,11 @@ export async function* generateStream(
 	);
 	const signal = options?.signal;
 
-	for (let attempt = 0; attempt < cfg.retry_attempts; attempt++) {
+	for (
+		let safetyAttempt = 0;
+		safetyAttempt < accountRetrySafetyLimit(cfg);
+		safetyAttempt++
+	) {
 		try {
 			throwIfAborted(signal);
 			const resp = await fetchGeminiStreamGenerate(
@@ -398,9 +576,10 @@ export async function* generateStream(
 					throw upstreamEmptyResponseError(
 						resp.status,
 						raw.length,
-						"stream without body",
+						upstreamResponseContext(resp, activeCfg, "stream without body"),
 					);
 				}
+				await markGeminiSessionSuccess(activeCfg);
 				return;
 			}
 			const reader = resp.body.getReader();
@@ -498,8 +677,13 @@ export async function* generateStream(
 					activeCfg = refreshedCfg;
 					continue;
 				}
-				throw upstreamEmptyResponseError(resp.status, rawLength, "stream");
+				throw upstreamEmptyResponseError(
+					resp.status,
+					rawLength,
+					upstreamResponseContext(resp, activeCfg, "stream"),
+				);
 			}
+			await markGeminiSessionSuccess(activeCfg);
 			return;
 		} catch (e) {
 			if (isAbortError(e) || signal?.aborted) throw abortError(signal);
@@ -510,20 +694,62 @@ export async function* generateStream(
 					activeCfg = await configWithCachedGeminiBuildLabel(rotated.config);
 					continue;
 				}
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					rotated.reason === "recent_rotation" ? null : "auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, rotated.reason);
 			}
-			if (isInvalidGeminiCookieError(e) && !yielded && refreshedCookie)
+			if (isInvalidGeminiCookieError(e) && !yielded && refreshedCookie) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					"auth",
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
 				throw invalidCookieErrorWithRotationReason(cfg, e, "rotation_updated");
+			}
 			if (
 				isLargePromptEmptyResponseError(e) ||
 				isDataAnalysisEmptyResponseError(e) ||
 				isInvalidGeminiCookieError(e)
 			)
 				throw e;
+			const poolIssue = pooledFailureIssue(e);
+			if (!yielded && poolIssue) {
+				const switched = await trySwitchPooledAccount(
+					activeCfg,
+					accountRetry,
+					poolIssue,
+				);
+				if (switched) {
+					activeCfg = switched;
+					refreshedCookie = false;
+					continue;
+				}
+			}
 			lastErr = e;
+			retryAttempt++;
+			if (retryAttempt >= cfg.retry_attempts) break;
 			if (
 				!yielded &&
-				(await waitBeforeRetry(cfg, attempt, e, "Stream retry", signal))
+				(await waitBeforeRetry(
+					cfg,
+					retryAttempt - 1,
+					e,
+					"Stream retry",
+					signal,
+				))
 			) {
 				continue;
 			}

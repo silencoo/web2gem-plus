@@ -13,6 +13,10 @@ import {
 	generateRich as generateGeminiRich,
 	generateStream,
 } from "./client";
+import {
+	abortGeminiSessionRotation,
+	configWithFreshGeminiCookie,
+} from "./cookies";
 import { resolveAttachments, uploadTextFile } from "./uploads";
 
 type ResolvedModelOK = Extract<ResolvedModel, { name: string }>;
@@ -54,14 +58,20 @@ function createGeminiCompletionProviderWithDependencies(
 	cfg: RuntimeConfig,
 	dependencies: GeminiCompletionProviderDependencies,
 ): CompletionProvider {
+	let activeConfigPromise: Promise<RuntimeConfig> | null = null;
+	const activeConfig = (): Promise<RuntimeConfig> => {
+		activeConfigPromise ||= configWithFreshGeminiCookie(cfg);
+		return activeConfigPromise;
+	};
 	return {
 		supportsAuthenticatedSession: !!cfg.cookie,
-		generateText(input: CompletionTextInput) {
+		async generateText(input: CompletionTextInput) {
 			const model = requireResolvedModel(input.rm);
+			const activeCfg = await activeConfig();
 			if (cfg.log_requests)
 				logGeminiRoute(dependencies.logStage, cfg, model, false);
 			return dependencies.generate(
-				cfg,
+				activeCfg,
 				input.prompt,
 				model.modeId,
 				model.thinkMode,
@@ -70,15 +80,16 @@ function createGeminiCompletionProviderWithDependencies(
 				model.modelHeaders,
 			);
 		},
-		generateRich(
+		async generateRich(
 			input: CompletionTextInput,
 			options: CompletionRichOptions = {},
 		) {
 			const model = requireResolvedModel(input.rm);
+			const activeCfg = await activeConfig();
 			if (cfg.log_requests)
 				logGeminiRoute(dependencies.logStage, cfg, model, false);
 			return dependencies.generateRich(
-				cfg,
+				activeCfg,
 				input.prompt,
 				model.modeId,
 				model.thinkMode,
@@ -93,10 +104,11 @@ function createGeminiCompletionProviderWithDependencies(
 			options: CompletionProviderOptions = {},
 		) {
 			const model = requireResolvedModel(input.rm);
+			const activeCfg = await activeConfig();
 			if (cfg.log_requests)
 				logGeminiRoute(dependencies.logStage, cfg, model, true);
 			for await (const delta of dependencies.generateStream(
-				cfg,
+				activeCfg,
 				input.prompt,
 				model.modeId,
 				model.thinkMode,
@@ -109,11 +121,15 @@ function createGeminiCompletionProviderWithDependencies(
 				if (text) yield text;
 			}
 		},
-		resolveAttachments(plan: AttachmentPlan) {
-			return dependencies.resolveAttachments(cfg, plan);
+		async resolveAttachments(plan: AttachmentPlan) {
+			return dependencies.resolveAttachments(await activeConfig(), plan);
 		},
-		uploadTextFile(text: string, filename: string) {
-			return dependencies.uploadTextFile(cfg, text, filename);
+		async uploadTextFile(text: string, filename: string) {
+			return dependencies.uploadTextFile(await activeConfig(), text, filename);
+		},
+		async dispose() {
+			if (!activeConfigPromise) return;
+			await abortGeminiSessionRotation(await activeConfigPromise);
 		},
 	};
 }

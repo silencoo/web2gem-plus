@@ -30,6 +30,11 @@ import { errorLogSummary } from "./shared/errors";
 import { uuid } from "./shared/crypto";
 import type { RuntimeConfig, WorkerEnv } from "./config";
 import type { RouteJsonPostResult } from "./http/core/route-json";
+import {
+	configWithPooledGeminiSession,
+	NoAvailableGeminiSessionError,
+} from "./gemini/session-pool";
+import { handleAdminRequest } from "./admin";
 
 const GOOGLE_GENERATE_PATH_RE =
 	/^\/v(?:1beta|1)\/models\/[^/?#]+:generateContent$/;
@@ -82,6 +87,11 @@ export async function handleApplicationRequest(
 	};
 
 	if (method === "OPTIONS") {
+		if (path === "/admin" || path.startsWith("/admin/"))
+			return new Response(null, {
+				status: 204,
+				headers: { "Cache-Control": "no-store" },
+			});
 		return new Response(null, {
 			status: 204,
 			headers: corsHeaders(request),
@@ -101,6 +111,31 @@ export async function handleApplicationRequest(
 		return respond(invalidRuntimeConfigResponse(error));
 	}
 
+	if (path === "/admin" || path.startsWith("/admin/")) {
+		try {
+			return withResponseHeader(
+				await handleAdminRequest(request, env, cfg),
+				"x-request-id",
+				requestId,
+			);
+		} catch (error) {
+			log(cfg, `admin error: ${errorLogSummary(error)}`);
+			return withResponseHeader(
+				jsonResponse(
+					{
+						error: {
+							message: "internal server error",
+							code: "internal_server_error",
+						},
+					},
+					500,
+				),
+				"x-request-id",
+				requestId,
+			);
+		}
+	}
+
 	if (path !== "/" && !authorized(request, url, cfg)) {
 		return respond(openAIErrorResponse("invalid api key", 401));
 	}
@@ -117,6 +152,14 @@ export async function handleApplicationRequest(
 		return respond(response);
 	} catch (error) {
 		log(cfg, `error: ${errorLogSummary(error)}`);
+		if (error instanceof NoAvailableGeminiSessionError) {
+			const message = "no available Gemini account";
+			return respond(
+				path.startsWith("/v1beta/") || path.startsWith("/v1/models/")
+					? jsonResponse(googleJsonError(message, error.code), error.status)
+					: openAIErrorResponse(message, error.status, error.code),
+			);
+		}
 		return respond(
 			jsonResponse(
 				{
@@ -196,7 +239,17 @@ function handleGetRoute(path: string): Response {
 async function handlePostRoute(
 	context: ApplicationRequestContext,
 ): Promise<Response> {
-	const { request, cfg, path } = context;
+	const { request, env, path } = context;
+	if (
+		path !== "/v1/chat/completions" &&
+		path !== "/v1/responses" &&
+		path !== "/v1/images/generations" &&
+		path !== "/v1/images/edits" &&
+		!GOOGLE_GENERATE_PATH_RE.test(path) &&
+		!GOOGLE_STREAM_GENERATE_PATH_RE.test(path)
+	)
+		return jsonTextResponse(NOT_FOUND_JSON, 404);
+	const cfg = await configWithPooledGeminiSession(context.cfg, env);
 	if (path === "/v1/chat/completions") {
 		return handleOpenAIJsonPost(request, cfg, path, (body) =>
 			handleChat(body, cfg, createProvider(cfg)),

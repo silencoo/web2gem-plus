@@ -7,12 +7,27 @@
 	"observability": {
 		"enabled": true
 	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "GEMINI_SESSION_POOL",
+				"class_name": "GeminiSessionPool"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1-gemini-session-pool",
+			"new_sqlite_classes": ["GeminiSessionPool"]
+		}
+	],
 	"vars": {
 		"GEMINI_BL": "boq_assistant-bard-web-server_20260709.09_p0",
 		"GEMINI_ORIGIN": "https://gemini.google.com",
 		"UPSTREAM_SOCKET": true,
 		"DEFAULT_MODEL": "gemini-3.5-flash",
 		"RETRY_ATTEMPTS": 3,
+		"GEMINI_ACCOUNT_MAX_ATTEMPTS": 10,
 		"RETRY_DELAY_SEC": 2,
 		"REQUEST_TIMEOUT_SEC": 180,
 		"REQUEST_BODY_MAX_BYTES": 16777216,

@@ -6,7 +6,13 @@ import { dirname, join, resolve } from "node:path";
 import { assert } from "./assertions.js";
 import { mod } from "./helpers.js";
 
-const DEPLOY_SECRET_TEMPLATE_KEYS = ["API_KEYS", "GEMINI_COOKIE", "SAPISID"];
+const DEPLOY_SECRET_TEMPLATE_KEYS = [
+	"ADMIN_PASSWORD",
+	"API_KEYS",
+	"GEMINI_COOKIE",
+	"GEMINI_COOKIES",
+	"SAPISID",
+];
 const DEPLOY_SECRET_KEYS = new Set(DEPLOY_SECRET_TEMPLATE_KEYS);
 const DOCKER_ONLY_ENV_KEYS = ["PORT", "WEB2GEM_PLUS_IMAGE"];
 

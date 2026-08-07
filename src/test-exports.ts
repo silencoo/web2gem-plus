@@ -1,5 +1,6 @@
 // Internal compatibility surface used by local unit and smoke tests.
 export { handleApplicationRequest } from "./app";
+export { GeminiSessionPool } from "./gemini/session-pool";
 export {
 	buildHeaders,
 	buildPayload,
@@ -83,6 +84,7 @@ export {
 export {
 	invalidGeminiCookieError,
 	isInvalidGeminiCookieError,
+	safeRedirectTarget,
 	unverifiedGeminiCookieError,
 } from "./gemini/client/errors";
 export {

@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from "../config";
+import type { GeminiSessionFailureIssue, RuntimeConfig } from "../config";
 import { errorLogSummary, log } from "../shared/runtime";
 import { GEMINI_WEB_USER_AGENT } from "./constants";
 import { httpFetch } from "./transport";
@@ -86,7 +86,7 @@ export function splitSetCookieHeader(header: unknown): string[] {
 }
 
 export function setCookieHeaders(headers: Headers): string[] {
-	return headers.getSetCookie();
+	return headers.getSetCookie().flatMap(splitSetCookieHeader);
 }
 
 export function mergeSetCookieHeaders(
@@ -111,6 +111,7 @@ export function mergeSetCookieHeaders(
 export function configWithActiveGeminiCookie(
 	cfg: RuntimeConfig,
 ): RuntimeConfig {
+	if (cfg.gemini_session_pool) return cfg;
 	const state = ensureActiveCookieState(cfg);
 	if (!state) return cfg;
 	return {
@@ -123,16 +124,27 @@ export function configWithActiveGeminiCookie(
 export async function configWithFreshGeminiCookie(
 	cfg: RuntimeConfig,
 ): Promise<RuntimeConfig> {
+	if (cfg.gemini_rotation) return cfg;
+	if (cfg.gemini_session_pool && cfg.gemini_session) {
+		if (
+			Date.now() - cfg.gemini_session.last_cookie_refresh_at_ms <=
+			COOKIE_ROTATE_STALE_MS
+		)
+			return cfg;
+		return (await rotatePooledGeminiCookie(cfg, false)) || cfg;
+	}
 	const state = ensureActiveCookieState(cfg);
 	if (!state) return cfg;
 	if (Date.now() - state.updatedAtMs > COOKIE_ROTATE_STALE_MS) {
 		const refreshed = await rotateGeminiCookie(cfg, { force: false });
-		if (refreshed)
-			return {
+		if (refreshed) {
+			const next = {
 				...cfg,
 				cookie: refreshed.cookie,
 				sapisid: refreshed.sapisid || cfg.sapisid,
 			};
+			return next;
+		}
 	}
 	return configWithActiveGeminiCookie(cfg);
 }
@@ -146,6 +158,14 @@ export async function rotateGeminiCookieForRetry(
 export async function rotateGeminiCookieForRetryWithReason(
 	cfg: RuntimeConfig,
 ): Promise<CookieRotationRetryResult> {
+	if (cfg.gemini_session_pool && cfg.gemini_session) {
+		if (cfg.gemini_rotation) {
+			setRotationReason("rotation_rejected");
+			return rotationRetryResult(null);
+		}
+		const next = await rotatePooledGeminiCookie(cfg, true);
+		return rotationRetryResult(next);
+	}
 	const current = configWithActiveGeminiCookie(cfg);
 	const refreshed = await rotateGeminiCookie(current, { force: true });
 	if (!refreshed || refreshed.cookie === current.cookie) {
@@ -156,6 +176,130 @@ export async function rotateGeminiCookieForRetryWithReason(
 		cookie: refreshed.cookie,
 		sapisid: refreshed.sapisid || cfg.sapisid,
 	});
+}
+
+export async function switchGeminiSessionForRetry(
+	cfg: RuntimeConfig,
+	excludeAccountIds: readonly string[] = [],
+	issue: GeminiSessionFailureIssue | null = "auth",
+): Promise<RuntimeConfig | null> {
+	const pool = cfg.gemini_session_pool;
+	const lease = cfg.gemini_session;
+	if (!pool || !lease) return null;
+	if (cfg.gemini_rotation) {
+		if (issue) await pool.failRotation(cfg.gemini_rotation, issue);
+		else await pool.abortRotation(cfg.gemini_rotation);
+	} else if (issue) await pool.markFailure(lease, issue);
+	const excluded = new Set(excludeAccountIds);
+	excluded.add(lease.account_id);
+	const next = await pool.acquire([...excluded]);
+	if (!next) return null;
+	const nextCfg = withoutRotation(cfg);
+	return {
+		...nextCfg,
+		cookie: next.cookie,
+		sapisid: next.sapisid,
+		gemini_session: next,
+	};
+}
+
+export async function markGeminiSessionSuccess(
+	cfg: RuntimeConfig,
+): Promise<void> {
+	if (!cfg.gemini_session_pool || !cfg.gemini_session) return;
+	try {
+		let lease = cfg.gemini_session;
+		if (cfg.gemini_rotation) {
+			const committed = await cfg.gemini_session_pool.commitRotation(
+				cfg.gemini_rotation,
+				cfg.cookie,
+				cfg.sapisid,
+			);
+			if (committed) lease = committed;
+		}
+		await cfg.gemini_session_pool.markSuccess(lease);
+	} catch (error) {
+		log(cfg, `gemini session success metric failed ${errorLogSummary(error)}`);
+	}
+}
+
+export async function abortGeminiSessionRotation(
+	cfg: RuntimeConfig,
+): Promise<void> {
+	if (!cfg.gemini_session_pool || !cfg.gemini_rotation) return;
+	try {
+		await cfg.gemini_session_pool.abortRotation(cfg.gemini_rotation);
+	} catch (error) {
+		log(cfg, `gemini session rotation abort failed ${errorLogSummary(error)}`);
+	}
+}
+
+async function rotatePooledGeminiCookie(
+	cfg: RuntimeConfig,
+	_force: boolean,
+): Promise<RuntimeConfig | null> {
+	const pool = cfg.gemini_session_pool;
+	const originalLease = cfg.gemini_session;
+	if (!pool || !originalLease) return null;
+	const start = await pool.beginRotation(originalLease);
+	if (start.status === "updated") {
+		setRotationReason("rotation_updated");
+		return configWithLease(cfg, start.lease);
+	}
+	if (start.status === "busy") {
+		setRotationReason("recent_rotation");
+		return null;
+	}
+	if (start.status !== "acquired") {
+		setRotationReason("rotation_failed");
+		return null;
+	}
+	const fencedCfg = configWithLease(cfg, start.lease);
+	const state = stateFromCookie(
+		fencedCfg.cookie,
+		cookieSourceKey(fencedCfg),
+		Date.now(),
+		fencedCfg.sapisid,
+	);
+	if (!state) {
+		await pool.abortRotation(start.rotation);
+		setRotationReason("missing_cookie");
+		return null;
+	}
+	const refreshed = await rotateGeminiCookieOnce(fencedCfg, state, false);
+	if (!refreshed || refreshed.cookie === state.cookie) {
+		if (
+			lastRotationReason === "rotation_rejected" ||
+			lastRotationReason === "missing_secure_1psid"
+		)
+			await pool.failRotation(start.rotation);
+		else await pool.abortRotation(start.rotation);
+		return null;
+	}
+	return {
+		...fencedCfg,
+		cookie: refreshed.cookie,
+		sapisid: refreshed.sapisid || fencedCfg.sapisid,
+		gemini_rotation: start.rotation,
+	};
+}
+
+function configWithLease(
+	cfg: RuntimeConfig,
+	lease: NonNullable<RuntimeConfig["gemini_session"]>,
+): RuntimeConfig {
+	const nextCfg = withoutRotation(cfg);
+	return {
+		...nextCfg,
+		cookie: lease.cookie,
+		sapisid: lease.sapisid,
+		gemini_session: lease,
+	};
+}
+
+function withoutRotation(cfg: RuntimeConfig): RuntimeConfig {
+	const { gemini_rotation: _rotation, ...rest } = cfg;
+	return rest;
 }
 
 async function rotateGeminiCookie(
@@ -199,6 +343,7 @@ async function rotateGeminiCookie(
 async function rotateGeminiCookieOnce(
 	cfg: RuntimeConfig,
 	state: ActiveCookieState,
+	updateGlobal = true,
 ): Promise<ActiveCookieState | null> {
 	try {
 		const resp = await httpFetch("https://accounts.google.com/RotateCookies", {
@@ -246,7 +391,7 @@ async function rotateGeminiCookieOnce(
 			log(cfg, "gemini cookie rotation completed without cookie update");
 			return state;
 		}
-		activeCookieState = next;
+		if (updateGlobal) activeCookieState = next;
 		setRotationReason("rotation_updated");
 		log(cfg, "gemini cookie rotation updated active cookie");
 		return next;
@@ -278,7 +423,9 @@ function stateFromCookie(
 	const cookies = parseCookieHeader(cookie);
 	const normalizedCookie = serializeCookieMap(cookies);
 	if (!normalizedCookie) return null;
-	const sapisid = String(sapisidOverride || cookies.get("SAPISID") || "");
+	// The cookie jar is authoritative after RotateCookies. An explicit SAPISID is
+	// only a fallback for compact configurations that omit it from the header.
+	const sapisid = String(cookies.get("SAPISID") || sapisidOverride || "");
 	return {
 		cookie: normalizedCookie,
 		sapisid,

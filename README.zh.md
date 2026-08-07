@@ -2,20 +2,18 @@
 
 [English](README.md) | [简体中文](README.zh.md)
 
-> **Fork 声明。** `web2gem-plus` 是 [`Guardinary/web2gem`](https://github.com/Guardinary/web2gem) 的社区维护 fork。它完整保留上游 API 表面，并叠加定向增强（最显著的是可选的 Gemini 水印去除流水线）。原始架构的全部功劳归属上游项目。
-
 轻量级 Gemini Web API 网关，兼容 OpenAI 和 Google Gemini 接口。可以将单文件 Worker 部署到 Cloudflare，也可以使用 Docker 自托管，并按需启用 API 鉴权和基于 Gemini cookie 的功能。
 
-> 当前是 `main` 分支文档，对应轻量、无持久化存储的版本。如果需要多账号持久化和管理页面，请查看 [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool)。
+`main` 分支同时支持单个 Gemini Cookie 和 Cloudflare Workers 上持久化的轮询 Cookie 池，不再需要单独的 account-pool 分支或管理后台。
 
-[选择版本](#选择版本) · [部署到 Cloudflare](#方式一通过-release-单文件-worker-产物部署) · [使用 Docker](#方式二通过-docker-部署) · [API 示例](#api-接口)
+[凭据模式](#凭据模式) · [部署到 Cloudflare](#方式一通过-release-单文件-worker-产物部署) · [使用 Docker](#方式二通过-docker-部署) · [API 示例](#api-接口)
 
 ## 目录
 
 - [web2gem-plus](#web2gem-plus)
   - [目录](#目录)
   - [概览](#概览)
-  - [选择版本](#选择版本)
+  - [凭据模式](#凭据模式)
   - [核心功能](#核心功能)
   - [开始前准备](#开始前准备)
   - [API 接口](#api-接口)
@@ -40,7 +38,7 @@
 
 ## 概览
 
-`web2gem-plus` 让 OpenAI 兼容客户端和 Google Gemini 兼容客户端通过熟悉的 HTTP API 使用 Gemini Web。`main` 版本刻意保持简单：没有账号数据库和管理页面；需要 Gemini 认证能力时，通过一个运行时 `GEMINI_COOKIE` 提供凭据，并在可能时只在内存中刷新。
+`web2gem-plus` 让 OpenAI 兼容客户端和 Google Gemini 兼容客户端通过熟悉的 HTTP API 使用 Gemini Web。认证功能可以使用单个 `GEMINI_COOKIE`，也可以通过 `GEMINI_COOKIES` 配置多个账号。Cloudflare Workers 使用 Durable Object 持久化轮询游标、账号健康状态和刷新后的 Cookie，隔离冷启动不会丢失这些状态。
 
 它适合个人部署、简单代理，以及希望保持无状态小型运行时的用户。Cloudflare Workers 可以在普通 `fetch` 路径受限时使用 `cloudflare:sockets`；Docker 默认使用标准 `fetch`。
 
@@ -56,20 +54,14 @@
 | Google Models                       | 支持 | `GET /v1beta/models`, `GET /v1beta/models/{model}`                                                   |
 | 健康检查                            | 支持 | `GET /`                                                                                              |
 
-## 选择版本
+## 凭据模式
 
-两个版本都提供常见的 OpenAI 兼容和 Google Gemini 兼容接口，并以不同分支独立发布。请按需要的存储方式自由选择；两者之间不存在必须遵循的升级关系。
-
-| | `main` | [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool) |
+| 模式 | 配置 | 行为 |
 | --- | --- | --- |
-| 适合场景 | 轻量个人部署或单运行时部署。 | 需要管理多个账号的共享或长期运行部署。 |
-| Gemini 凭据 | 在运行时 secret 中可选配置单个 `GEMINI_COOKIE`，刷新状态只保存在内存中。 | 将多个 Gemini 账号持久化保存到 D1。 |
-| 持久化存储 | 不需要。 | 必须配置 `GEMINI_DB`；Docker 使用 D1 HTTP binding。 |
-| 账号管理 | 凭据变化时更新运行时 secret。 | 提供 `/admin` WebUI 和 `/admin/accounts` API。 |
-| 运行能力 | 配置最少，依赖更少。 | 支持账号选择、健康状态、冷却、刷新跟踪和脱敏诊断。 |
-| 公共 API 鉴权 | 可选 `API_KEYS`。 | 可选 `API_KEYS`，管理操作额外使用唯一 `ADMIN_KEY`。 |
+| 单账号 | `GEMINI_COOKIE` 和可选 `SAPISID` | 完全向后兼容；在 Workers 上，刷新状态也会持久化到会话池 Durable Object。 |
+| 账号池 | `GEMINI_COOKIES` | Cookie 字符串或对象组成的 JSON 数组；请求按 round-robin 轮询，认证失败时先刷新再切换账号，并通过临时冷却替代永久禁用。 |
 
-如果你只需要最简单的部署，并且不需要持久化账号池，请选择 `main`。如果你希望导入和管理多个账号，而不把账号直接存放在 Worker 或容器环境变量中，请选择 `gemini-account-pool`。
+同时配置时 `GEMINI_COOKIES` 优先。设置 `ADMIN_PASSWORD` 后，可通过 `/admin` 使用不会回显凭据的账号管理 WebUI。
 
 ## 核心功能
 
@@ -83,7 +75,7 @@
 | 自动去水印                 | 可选开启。基于 [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) 反向 Alpha 混合，在网页全尺寸下载链路之后只处理右下角裁剪区域。**默认 `remove_watermark: false`**（保留角标），避免 full-size ~2K 在 Workers 上触发 CPU 超限（Error 1102）。需要去水印时传 `"remove_watermark": true`，或用 GargantuaX / 浏览器扩展离线处理。 |
 | 图片输入处理               | 通过 Gemini provider 路径解析用户提供的内联/base64 图片；Worker 不抓取远程图片或文件 URL。                                                        |
 | 通用文件附件               | 配置 Gemini cookie 后，请求内 `input_file` 和非图片内联数据可使用 Gemini Web 上传引用，支持任意文件名和 MIME；不实现持久化 `/v1/files` 服务。     |
-| Worker 和 Docker 部署      | 可将 Worker bundle 部署到 Cloudflare Workers，也可用 Docker / Docker Compose 自托管；`main` 的两种模式都不需要账号数据库。                        |
+| Worker 和 Docker 部署      | 可将 Worker bundle 部署到 Cloudflare Workers，也可用 Docker / Docker Compose 自托管；Workers 使用 Durable Object 持久化会话池状态。              |
 | 上游 socket 传输           | Workers 在可用时优先使用 `cloudflare:sockets`；Docker 默认使用标准 `fetch`。                                                                      |
 
 ## 开始前准备
@@ -99,7 +91,7 @@
 | 将大段提示词作为 Gemini 文本附件上传 | 设置 `GEMINI_COOKIE`。 |
 | 使用自定义转发源站 | 设置 `GEMINI_ORIGIN`。 |
 
-Gemini Web 属于可能随时变化的上游 Web 协议，本项目更适合个人、研究和内部使用场景。如果需要持久化多账号运行，请改用 [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool) 版本。
+Gemini Web 属于可能随时变化的上游 Web 协议，本项目更适合个人、研究和内部使用场景。
 
 ## API 接口
 
@@ -295,13 +287,16 @@ docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 | 变量                            | 默认值                      | 说明                                                                                                                                                                               |
 | ------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `API_KEYS`                      | empty                       | 逗号分隔或 JSON 数组形式的 API keys。为空时关闭认证；空成员、非字符串成员和重复项会被拒绝。                                                                                                                              |
+| `ADMIN_PASSWORD`                | empty                       | `/admin` 与 `/admin/api/accounts` 的访问密码。用户名固定为 `admin`；留空时管理路由返回 HTTP 404。请作为 secret 配置。 |
 | `GEMINI_COOKIE`                 | empty                       | 原始 Gemini cookie 字符串；或包含 `cookie` 和可选 `sapisid` 的 JSON；或包含 `secure_1psid`、`secure_1psidts` 和可选 `sapisid` 的 JSON。真实 Pro 路由、大上下文文本附件和已登录 Gemini Web 行为需要它。 |
+| `GEMINI_COOKIES`                | empty                       | Cookie 字符串或 Cookie 对象组成的 JSON 数组。它优先于 `GEMINI_COOKIE` 并启用 round-robin 账号选择；请作为 secret 配置。 |
 | `SAPISID`                       | empty                       | 可选 SAPISID 覆盖值。为空时会尽量从 `GEMINI_COOKIE` 提取。                                                                                                                         |
 | `GEMINI_BL`                     | bundled value               | 上游请求使用的 Gemini Web build label。如果 Gemini Web 变化导致上游响应为空，需要更新它。                                                                                          |
 | `GEMINI_ORIGIN`                 | `https://gemini.google.com` | 上游源站。可指向你自己的转发服务或代理地址，并保留预期请求语义。                                                                                                                   |
 | `UPSTREAM_SOCKET`               | `true`                      | 可用时优先使用 `cloudflare:sockets` 作为上游传输。                                                                                                                                 |
 | `DEFAULT_MODEL`                 | `gemini-3.5-flash`          | 请求省略 `model` 时使用的模型。                                                                                                                                                    |
 | `RETRY_ATTEMPTS`                | `3`                         | 上游重试次数；最小值为 `1`。                                                                                                                                                       |
+| `GEMINI_ACCOUNT_MAX_ATTEMPTS`   | `10`                        | 单个逻辑请求最多尝试的不同池账号数；该预算与 `RETRY_ATTEMPTS` 相互独立。                                                                                                           |
 | `RETRY_DELAY_SEC`               | `2`                         | 重试间隔秒数；最小值为 `0`。                                                                                                                                                       |
 | `REQUEST_TIMEOUT_SEC`           | `180`                       | 上游请求超时秒数；最小值为 `1`。                                                                                                                                                   |
 | `REQUEST_BODY_MAX_BYTES`        | `16777216`                  | 缓冲 JSON 请求体的最大字节数。声明或流式请求体超过该限制时会在 JSON 解析前返回 HTTP 413；multipart 图片编辑仍使用附件大小限制。                                                   |
@@ -315,14 +310,30 @@ docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 使用 Wrangler CLI 管理 Worker 时，可通过以下命令设置可选 secrets：
 
 - 共享部署时设置 `API_KEYS`。为空时会关闭认证。
+- 设置 `ADMIN_PASSWORD` 以启用账号池状态页和管理 API。
 - 需要 Pro 路由、生图/图片编辑、大上下文文本附件或其他已登录 Gemini Web 行为时设置 `GEMINI_COOKIE`。
+- 多个账号共同承担请求时，改为设置 JSON 数组形式的 `GEMINI_COOKIES`。
 
 ```sh
 wrangler secret put API_KEYS
+wrangler secret put ADMIN_PASSWORD
 wrangler secret put GEMINI_COOKIE
+# 或者：
+wrangler secret put GEMINI_COOKIES
 ```
 
-当 `GEMINI_COOKIE` 包含 `__Secure-1PSID` 时，Worker 会为当前 isolate 保留一份内存中的活跃 cookie，并在 cookie 过期或认证上游请求失败时懒调用 Google 的 `RotateCookies` 端点。刷新后的 cookie 只保存在内存中；Worker 不会为它们使用数据库，也不会写回 Worker secrets。冷启动会重新从 `GEMINI_COOKIE` 初始化。
+设置 `ADMIN_PASSWORD` 后，打开 `/admin`，通过 HTTP Basic Auth 使用用户名 `admin` 登录。页面只展示账号名称、脱敏标识、健康状态、计数和时间，不返回 Cookie 或 SAPISID。`GET /admin/api/accounts` 返回相同的脱敏数据；`PATCH /admin/api/accounts` 接受 `{ "account_id": "...", "action": "enable|disable|reset" }`。
+
+当配置的 Cookie 包含 `__Secure-1PSID` 时，Worker 会在 Cookie 过期或认证上游请求失败时懒调用 Google 的 `RotateCookies` 端点。刷新后的凭据通过带版本比较的更新写入 `GEMINI_SESSION_POOL` Durable Object，因此新 isolate 会读取最新状态，不再回退到旧 secret。修改 secret 会替换对应账号的存储状态并重新启用它。
+
+账号池示例：
+
+```json
+[
+  { "name": "主账号", "secure_1psid": "ACCOUNT_1_PSID", "secure_1psidts": "ACCOUNT_1_TS" },
+  { "name": "备用账号", "cookie": "__Secure-1PSID=ACCOUNT_2_PSID; __Secure-1PSIDTS=ACCOUNT_2_TS" }
+]
+```
 
 对于单 cookie 部署，建议使用尽量短的 cookie 形式：`__Secure-1PSID`、`__Secure-1PSIDTS` 和可选 `SAPISID`。用新的无痕浏览器 Gemini 登录，提取这些值后关闭浏览器，通常比复制日常浏览器的完整 cookie header 更稳定。如果冷启动回退到过期的 `__Secure-1PSIDTS`，第一次认证请求会尝试刷新它。如果 Google 拒绝刷新或没有返回更新后的 cookie，需要手动更新 `GEMINI_COOKIE` secret。
 
@@ -359,7 +370,7 @@ wrangler secret put GEMINI_COOKIE
 | 共享接口返回 401 | 通过 `Authorization: Bearer`、`x-api-key` 或 `x-goog-api-key` 发送一个已配置的 `API_KEYS` 值。 |
 | Gemini 返回空内容 | 检查 `GEMINI_BL` 是否仍与当前 Gemini Web 前端一致。如果 Cloudflare 出口受限，配置兼容的 `GEMINI_ORIGIN`。 |
 | Docker 无法访问服务 | 检查 `${PORT:-52389}:${PORT:-52389}` 端口映射，并使用实际配置的宿主机端口。 |
-| 需要多个持久化账号 | 改用 [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool)，不要尝试在 `GEMINI_COOKIE` 中放置多个账号。 |
+| 没有可用的池账号 | 打开 `/admin` 检查正在冷却或被手动停用的账号。认证失败会自动结束冷却；修改 Cookie 或手动重置可立即恢复账号。 |
 
 ## 开发
 
@@ -381,7 +392,7 @@ pnpm smoke
 | `dist/worker.js`      | `src/index.ts`      | 由 Wrangler 部署的生产 Worker。   |
 | `dist/worker.test.js` | `src/test-index.ts` | 带内部辅助导出的本地测试 bundle。 |
 
-维护者通过 **Actions → Release Main Edition** 发布 `main`，通过 **Actions → Release Account Pool Edition** 发布 `gemini-account-pool`。两个入口都维护在 `main`，并从对应版本的不可变 revision 构建发布产物。
+维护者通过 **Actions → Release Main Edition** 发布 `main`。
 
 ## 测试
 
@@ -443,7 +454,7 @@ pnpm docker:smoke
 
 ## 致谢
 
-本项目 fork 自 [Guardinary/web2gem](https://github.com/Guardinary/web2gem)。所有上游行为与架构都来自该项目；本 fork 在其上加入定向增强（最显著的是可选的水印去除流水线）。
+项目源码和 Release 维护在 [silencoo/web2gem-plus](https://github.com/silencoo/web2gem-plus)。
 
 - 去水印核心 vendored 自 [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover)（详见 `src/gemini/client/watermark/vendor/`）。
 

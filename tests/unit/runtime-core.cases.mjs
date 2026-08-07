@@ -575,6 +575,179 @@ export const cases = [
 		},
 	],
 	[
+		"parses the Gemini cookie account pool and gives it precedence",
+		async () => {
+			const cfg = mod.getConfig({
+				GEMINI_COOKIE: "__Secure-1PSID=legacy",
+				GEMINI_COOKIES: JSON.stringify([
+					"__Secure-1PSID=first; SAPISID=first-sapisid",
+					{ secure_1psid: "second", secure_1psidts: "second-ts" },
+				]),
+			});
+			assert.equal(cfg.gemini_cookies.length, 2);
+			assert.equal(cfg.cookie, "__Secure-1PSID=first; SAPISID=first-sapisid");
+			assert.equal(cfg.sapisid, "first-sapisid");
+			assert.equal(
+				cfg.gemini_cookies[1].cookie,
+				"__Secure-1PSID=second; __Secure-1PSIDTS=second-ts",
+			);
+			for (const value of ["not-json", "[]", "[null]"]) {
+				assert.throws(
+					() => mod.getConfig({ GEMINI_COOKIES: value }),
+					/invalid runtime configuration: GEMINI_COOKIES/,
+				);
+			}
+		},
+	],
+	[
+		"persists round-robin sessions and automatically recovers cooled accounts",
+		async () => {
+			const originalNow = Date.now;
+			let now = 1_700_000_000_000;
+			Date.now = () => now;
+			try {
+				let stored;
+				const storage = {
+					transaction: async (callback) => callback(storage),
+					get: async () => stored,
+					put: async (_key, value) => {
+						stored = structuredClone(value);
+					},
+				};
+				const pool = new mod.GeminiSessionPool({ storage });
+				const seeds = [
+					{ cookie: "__Secure-1PSID=one", sapisid: "" },
+					{ cookie: "__Secure-1PSID=two", sapisid: "" },
+				];
+				const call = async (path, body) => {
+					const response = await pool.fetch(
+						new Request(`https://pool.test${path}`, {
+							method: "POST",
+							body: JSON.stringify(body),
+						}),
+					);
+					return response.json();
+				};
+
+				const first = await call("/acquire", { seeds });
+				const second = await call("/acquire", { seeds });
+				const third = await call("/acquire", { seeds });
+				assert.equal(first.account_id === second.account_id, false);
+				assert.equal(third.account_id, first.account_id);
+
+				await call("/failure", { lease: first, issue: "auth" });
+				const afterInvalidation = await call("/acquire", { seeds });
+				assert.equal(afterInvalidation.account_id, second.account_id);
+				const cooling = await call("/accounts", { seeds });
+				assert.equal(cooling[0].status, "cooling");
+				assert.equal(cooling[0].issue, "auth");
+
+				now += 60_001;
+				const reenabled = await call("/acquire", {
+					seeds,
+					exclude: [second.account_id],
+				});
+				assert.equal(reenabled.account_id, first.account_id);
+				const recovered = await call("/accounts", { seeds });
+				assert.equal(recovered[0].status, "healthy");
+				assert.equal(recovered[0].issue, "");
+			} finally {
+				Date.now = originalNow;
+			}
+		},
+	],
+	[
+		"migrates permanently disabled legacy auth failures back into service",
+		async () => {
+			let stored;
+			const storage = {
+				transaction: async (callback) => callback(storage),
+				get: async () => stored,
+				put: async (_key, value) => {
+					stored = structuredClone(value);
+				},
+			};
+			const pool = new mod.GeminiSessionPool({ storage });
+			const seeds = [{ cookie: "__Secure-1PSID=legacy", sapisid: "" }];
+			const call = async (path, body) => {
+				const response = await pool.fetch(
+					new Request(`https://pool.test${path}`, {
+						method: "POST",
+						body: JSON.stringify(body),
+					}),
+				);
+				return response.json();
+			};
+
+			const lease = await call("/acquire", { seeds });
+			stored.schema_version = 3;
+			stored.accounts[lease.account_id].disabled = true;
+			stored.accounts[lease.account_id].disabled_reason = "auth_failed";
+			delete stored.accounts[lease.account_id].issue;
+			delete stored.accounts[lease.account_id].cooldown_until_ms;
+
+			const migrated = await call("/acquire", { seeds });
+			assert.equal(migrated.account_id, lease.account_id);
+			const accounts = await call("/accounts", { seeds });
+			assert.equal(accounts[0].status, "healthy");
+		},
+	],
+	[
+		"fences concurrent Gemini cookie rotations and commits only validated candidates",
+		async () => {
+			let stored;
+			const storage = {
+				transaction: async (callback) => callback(storage),
+				get: async () => stored,
+				put: async (_key, value) => {
+					stored = structuredClone(value);
+				},
+			};
+			const pool = new mod.GeminiSessionPool({ storage });
+			const seeds = [
+				{ cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old", sapisid: "" },
+			];
+			const call = async (path, body) => {
+				const response = await pool.fetch(
+					new Request(`https://pool.test${path}`, {
+						method: "POST",
+						body: JSON.stringify(body),
+					}),
+				);
+				return response.json();
+			};
+
+			const original = await call("/acquire", { seeds });
+			const begun = await call("/begin-rotation", { lease: original });
+			assert.equal(begun.status, "acquired");
+			assert.equal(await call("/acquire", { seeds }), null);
+
+			await call("/failure", { lease: original, issue: "auth" });
+			const accountsWhileRotating = await call("/accounts", { seeds });
+			assert.equal(accountsWhileRotating[0].status, "healthy");
+
+			const staleBegin = await call("/begin-rotation", { lease: original });
+			assert.equal(staleBegin.status, "busy");
+			const committed = await call("/commit-rotation", {
+				rotation: begun.rotation,
+				cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=new",
+				sapisid: "",
+			});
+			assert.match(committed.cookie, /__Secure-1PSIDTS=new/);
+			assert.equal(committed.version > original.version, true);
+			const next = await call("/acquire", { seeds });
+			assert.match(next.cookie, /__Secure-1PSIDTS=new/);
+
+			await call("/commit-rotation", {
+				rotation: begun.rotation,
+				cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=stale",
+				sapisid: "",
+			});
+			const afterStaleCommit = await call("/acquire", { seeds });
+			assert.match(afterStaleCommit.cookie, /__Secure-1PSIDTS=new/);
+		},
+	],
+	[
 		"resolves model defaults think overrides and invalid model inputs",
 		async () => {
 			assert.equal(
@@ -645,7 +818,7 @@ export const cases = [
 					method: "GET",
 					path: "/admin",
 					env: { API_KEYS: "required" },
-					status: 401,
+					status: 404,
 				},
 				{
 					method: "GET",
@@ -674,6 +847,135 @@ export const cases = [
 					`${item.method} ${item.path}`,
 				);
 			}
+		},
+	],
+	[
+		"returns an immediate typed 503 when the Gemini account pool is empty",
+		async () => {
+			let poolCalls = 0;
+			const env = {
+				GEMINI_COOKIES: JSON.stringify(["__Secure-1PSID=one"]),
+				GEMINI_SESSION_POOL: {
+					getByName() {
+						return {
+							async fetch() {
+								poolCalls++;
+								return Response.json(null);
+							},
+						};
+					},
+				},
+			};
+			const started = performance.now();
+			const response = await mod.handleApplicationRequest(
+				new Request("https://worker.example/v1/chat/completions", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						model: "gemini-3.5-flash",
+						messages: [{ role: "user", content: "hello" }],
+					}),
+				}),
+				env,
+				{ waitUntil() {} },
+			);
+			assert.equal(response.status, 503);
+			assert.equal(
+				(await response.json()).error.code,
+				"no_available_gemini_account",
+			);
+			assert.equal(performance.now() - started < 1000, true);
+			assert.equal(poolCalls, 1);
+
+			const missing = await mod.handleApplicationRequest(
+				new Request("https://worker.example/missing", { method: "POST" }),
+				env,
+				{ waitUntil() {} },
+			);
+			assert.equal(missing.status, 404);
+			assert.equal(poolCalls, 1);
+		},
+	],
+	[
+		"protects the redacted admin account page and API with ADMIN_PASSWORD",
+		async () => {
+			const execution = { waitUntil() {} };
+			const env = {
+				ADMIN_PASSWORD: "admin-secret",
+				API_KEYS: "unrelated-public-api-key",
+				GEMINI_COOKIES: JSON.stringify([
+					{
+						name: "Primary",
+						cookie: "__Secure-1PSID=private-cookie-one",
+					},
+					{
+						name: "Backup",
+						cookie: "__Secure-1PSID=private-cookie-two",
+					},
+				]),
+			};
+			const auth = `Basic ${btoa("admin:admin-secret")}`;
+			const request = (path, options = {}) =>
+				mod.handleApplicationRequest(
+					new Request(`https://worker.example${path}`, options),
+					env,
+					execution,
+				);
+
+			const challenge = await request("/admin");
+			assert.equal(challenge.status, 401);
+			assert.match(challenge.headers.get("www-authenticate"), /Basic/);
+
+			const page = await request("/admin", {
+				headers: { authorization: auth },
+			});
+			assert.equal(page.status, 200);
+			assert.match(
+				page.headers.get("content-security-policy"),
+				/default-src 'none'/,
+			);
+			assert.equal(page.headers.get("access-control-allow-origin"), null);
+			assert.match(await page.text(), /Gemini 账号池/);
+
+			const api = await request("/admin/api/accounts", {
+				headers: { authorization: auth },
+			});
+			assert.equal(api.status, 200);
+			const raw = await api.text();
+			assert.doesNotMatch(raw, /private-cookie/);
+			const accounts = JSON.parse(raw).accounts;
+			assert.equal(accounts.length, 2);
+			assert.equal(accounts[0].label, "Primary");
+			assert.equal(accounts[0].status, "healthy");
+
+			const changed = await request("/admin/api/accounts", {
+				method: "PATCH",
+				headers: {
+					authorization: auth,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({
+					account_id: accounts[0].account_id,
+					action: "disable",
+				}),
+			});
+			assert.equal(changed.status, 200);
+			assert.equal((await changed.json()).accounts[0].status, "disabled");
+
+			const crossOrigin = await request("/admin/api/accounts", {
+				method: "PATCH",
+				headers: {
+					authorization: auth,
+					"content-type": "application/json",
+					origin: "https://attacker.example",
+				},
+				body: JSON.stringify({
+					account_id: accounts[0].account_id,
+					action: "enable",
+				}),
+			});
+			assert.equal(crossOrigin.status, 403);
 		},
 	],
 	[

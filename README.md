@@ -2,20 +2,18 @@
 
 [English](README.md) | [简体中文](README.zh.md)
 
-> **Fork notice.** `web2gem-plus` is a community-maintained fork of [`Guardinary/web2gem`](https://github.com/Guardinary/web2gem). It keeps the upstream API surface intact and adds targeted enhancements (notably the optional Gemini watermark-removal pipeline). All credit for the original architecture goes to the upstream project.
-
 Lightweight Gemini Web gateway with OpenAI-compatible and Google-compatible APIs. Deploy the single Worker bundle to Cloudflare or run it with Docker, with optional API authentication and Gemini cookie-backed features.
 
-> You are reading the `main` branch documentation. This is the lightweight, non-persistent edition. Need multiple persistent accounts and a management console? See [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool).
+The `main` branch supports either one Gemini cookie or a persistent round-robin cookie pool on Cloudflare Workers. No separate account-pool branch or management console is required.
 
-[Choose an edition](#choose-an-edition) · [Deploy to Cloudflare](#option-1-deploy-the-release-single-file-worker) · [Deploy with Docker](#option-2-deploy-with-docker) · [API examples](#api-surface)
+[Credential modes](#credential-modes) · [Deploy to Cloudflare](#option-1-deploy-the-release-single-file-worker) · [Deploy with Docker](#option-2-deploy-with-docker) · [API examples](#api-surface)
 
 ## Contents
 
 - [web2gem-plus](#web2gem-plus)
   - [Contents](#contents)
   - [Overview](#overview)
-  - [Choose an Edition](#choose-an-edition)
+  - [Credential Modes](#credential-modes)
   - [Core Features](#core-features)
   - [Before You Start](#before-you-start)
   - [API Surface](#api-surface)
@@ -40,7 +38,7 @@ Lightweight Gemini Web gateway with OpenAI-compatible and Google-compatible APIs
 
 ## Overview
 
-`web2gem-plus` lets OpenAI-compatible and Google Gemini-compatible clients use Gemini Web through a familiar HTTP API. The `main` edition is intentionally simple: it has no account database or admin console, and optional authenticated Gemini features use one runtime `GEMINI_COOKIE` that is refreshed in memory when possible.
+`web2gem-plus` lets OpenAI-compatible and Google Gemini-compatible clients use Gemini Web through a familiar HTTP API. Optional authenticated features can use one `GEMINI_COOKIE` or multiple accounts in `GEMINI_COOKIES`. On Cloudflare Workers, a Durable Object persists the round-robin cursor, account health, and refreshed cookie values across isolate cold starts.
 
 It works well for personal deployments, simple proxies, and users who prefer a small stateless runtime. Cloudflare Workers can use `cloudflare:sockets` for upstream transport when regular `fetch` paths are rate-limited; Docker uses standard `fetch` by default.
 
@@ -56,20 +54,14 @@ The main compatibility targets are:
 | Google Models                       | Supported | `GET /v1beta/models`, `GET /v1beta/models/{model}`                                                   |
 | Health                              | Supported | `GET /`                                                                                              |
 
-## Choose an Edition
+## Credential Modes
 
-Both editions expose familiar OpenAI-compatible and Google-compatible APIs. They are released as separate branches, so choose the storage model that fits your deployment; neither branch is presented as an upgrade path for the other.
-
-| | `main` | [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool) |
+| Mode | Configuration | Behavior |
 | --- | --- | --- |
-| Best for | Lightweight personal or single-runtime deployments. | Shared or long-running deployments that need multiple managed accounts. |
-| Gemini credentials | Optional single `GEMINI_COOKIE` in runtime secrets; refreshed state stays in memory. | Multiple Gemini accounts stored persistently in D1. |
-| Persistent storage | None required. | Requires `GEMINI_DB`; Docker uses the D1 HTTP binding. |
-| Account management | Update the runtime secret when credentials change. | Built-in `/admin` WebUI plus `/admin/accounts` API. |
-| Operations | Smallest setup and fewer moving parts. | Account selection, health state, cooldowns, refresh tracking, and redacted diagnostics. |
-| Public API authentication | Optional `API_KEYS`. | Optional `API_KEYS`, with a separate single `ADMIN_KEY` for management. |
+| Single account | `GEMINI_COOKIE` and optional `SAPISID` | Backward-compatible setup. On Workers, refreshed state is persisted in the session-pool Durable Object. |
+| Account pool | `GEMINI_COOKIES` | JSON array of cookie strings or cookie objects. Requests use round-robin selection, refresh authentication before failover, and cool rejected accounts temporarily instead of disabling them permanently. |
 
-Choose `main` if you want the simplest deployment and do not need a persistent account pool. Choose `gemini-account-pool` if you want to import and manage multiple accounts without storing them directly in Worker or container environment variables.
+`GEMINI_COOKIES` takes precedence when both settings are present. Set `ADMIN_PASSWORD` to enable the redacted account-management WebUI at `/admin`.
 
 ## Core Features
 
@@ -83,7 +75,7 @@ Choose `main` if you want the simplest deployment and do not need a persistent a
 | Watermark removal            | Optional opt-in. Uses [GargantuaX](https://github.com/GargantuaX/gemini-watermark-remover) reverse-alpha blending on a **bottom-right corner crop** after the web full-size download path. **Default `remove_watermark: false`** (keeps the Gemini sparkle) so full-size ~2K downloads do not hit Workers CPU Error 1102. Pass `"remove_watermark": true` to scrub in-Worker, or scrub offline with GargantuaX / the browser extension. |
 | Image input handling         | Resolves user-provided inline/base64 images through the Gemini provider path. The Worker does not fetch remote image or file URLs.                |
 | Generic file attachments     | With a Gemini cookie, request-local `input_file` and inline non-image data can use Gemini Web upload references with arbitrary filenames and MIME types; persistent `/v1/files` storage is not implemented. |
-| Worker and Docker deployment | Deploy the Worker bundle to Cloudflare Workers or self-host with Docker / Docker Compose; neither mode requires an account database on `main`.   |
+| Worker and Docker deployment | Deploy the Worker bundle to Cloudflare Workers or self-host with Docker / Docker Compose. Workers persist session-pool state in a Durable Object. |
 | Upstream socket transport    | Workers prefer `cloudflare:sockets` when available; Docker uses standard `fetch`.                                                                |
 
 ## Before You Start
@@ -99,7 +91,7 @@ Choose only the settings your deployment needs:
 | Upload large prompt context as Gemini text attachments | Set `GEMINI_COOKIE`. |
 | Run behind a custom forwarding origin | Set `GEMINI_ORIGIN`. |
 
-Gemini Web is an upstream web protocol and may change without notice. This project is best suited to personal, research, and internal use. For persistent multi-account operation, choose the [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool) edition instead.
+Gemini Web is an upstream web protocol and may change without notice. This project is best suited to personal, research, and internal use.
 
 ## API Surface
 
@@ -295,13 +287,16 @@ Configuration defaults live in `src/config/index.ts`. Cloudflare Worker environm
 | Variable                        | Default                     | Description                                                                                                                                                                                                      |
 | ------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `API_KEYS`                      | empty                       | Comma-separated or JSON-array API keys. Empty disables auth. Empty members, non-string members, and duplicates are rejected.                                                                                                                                                     |
+| `ADMIN_PASSWORD`                | empty                       | Password for `/admin` and `/admin/api/accounts`. The username is always `admin`; leaving this empty disables the admin routes with HTTP 404. Configure it as a secret. |
 | `GEMINI_COOKIE`                 | empty                       | Raw Gemini cookie string; JSON with `cookie` and optional `sapisid`; or JSON with `secure_1psid`, `secure_1psidts`, and optional `sapisid`. Needed for real Pro routing, large-context text attachments, and signed-in Gemini Web behavior. |
+| `GEMINI_COOKIES`                | empty                       | JSON array of cookie strings or cookie objects. Takes precedence over `GEMINI_COOKIE` and enables round-robin account selection. Configure it as a secret. |
 | `SAPISID`                       | empty                       | Optional SAPISID override. If empty, it is extracted from `GEMINI_COOKIE` when possible.                                                                                                                         |
 | `GEMINI_BL`                     | bundled value               | Gemini Web build label used by upstream requests. Update if Gemini Web changes and upstream responses become empty.                                                                                              |
 | `GEMINI_ORIGIN`                 | `https://gemini.google.com` | Upstream origin. Can point to your own forwarding service or proxy endpoint while preserving expected request semantics.                                                                                         |
 | `UPSTREAM_SOCKET`               | `true`                      | Prefer `cloudflare:sockets` upstream transport when available.                                                                                                                                                   |
 | `DEFAULT_MODEL`                 | `gemini-3.5-flash`          | Model used when a request omits `model`.                                                                                                                                                                         |
 | `RETRY_ATTEMPTS`                | `3`                         | Upstream retry attempts; minimum `1`.                                                                                                                                                                            |
+| `GEMINI_ACCOUNT_MAX_ATTEMPTS`   | `10`                        | Maximum distinct pooled accounts attempted by one logical request. This budget is independent from `RETRY_ATTEMPTS`.                                                                                           |
 | `RETRY_DELAY_SEC`               | `2`                         | Delay between retry attempts; minimum `0`.                                                                                                                                                                       |
 | `REQUEST_TIMEOUT_SEC`           | `180`                       | Upstream request timeout; minimum `1`.                                                                                                                                                                           |
 | `REQUEST_BODY_MAX_BYTES`        | `16777216`                  | Maximum buffered JSON request-body bytes. Declared or streamed bodies above this limit are rejected with HTTP 413 before JSON parsing; multipart image edits use their attachment limit instead.                  |
@@ -315,14 +310,30 @@ Configuration defaults live in `src/config/index.ts`. Cloudflare Worker environm
 When managing a Worker through the Wrangler CLI, optional secrets can be set with:
 
 - Set `API_KEYS` for shared deployments. If it is empty, auth is disabled.
+- Set `ADMIN_PASSWORD` to enable the account-pool status page and management API.
 - Set `GEMINI_COOKIE` when Pro routing, image generation/editing, large-context text attachments, or other signed-in Gemini Web behavior is needed.
+- Or set `GEMINI_COOKIES` to a JSON array when several accounts should share requests.
 
 ```sh
 wrangler secret put API_KEYS
+wrangler secret put ADMIN_PASSWORD
 wrangler secret put GEMINI_COOKIE
+# alternatively:
+wrangler secret put GEMINI_COOKIES
 ```
 
-When `GEMINI_COOKIE` contains `__Secure-1PSID`, the Worker keeps an in-memory active cookie for the current isolate and lazily calls Google's `RotateCookies` endpoint when the cookie is stale or an authenticated upstream request fails. Refreshed cookies are kept in memory only; the Worker does not use a database for them or write them back to Worker secrets. A cold start initializes again from `GEMINI_COOKIE`.
+After setting `ADMIN_PASSWORD`, open `/admin` and sign in through HTTP Basic Auth with username `admin`. The page shows only account labels, redacted identifiers, health, counters, and timestamps. It never returns Cookie or SAPISID values. `GET /admin/api/accounts` returns the same redacted data; `PATCH /admin/api/accounts` accepts `{ "account_id": "...", "action": "enable|disable|reset" }`.
+
+When a configured cookie contains `__Secure-1PSID`, the Worker lazily calls Google's `RotateCookies` endpoint when the cookie is stale or an authenticated upstream request fails. Refreshed credentials are committed to the `GEMINI_SESSION_POOL` Durable Object with compare-and-swap versioning, so a cold isolate reads the latest stored value instead of reverting to an older secret. Changing the secret replaces the corresponding stored account and re-enables it.
+
+Example pool value:
+
+```json
+[
+  { "name": "Primary", "secure_1psid": "ACCOUNT_1_PSID", "secure_1psidts": "ACCOUNT_1_TS" },
+  { "name": "Backup", "cookie": "__Secure-1PSID=ACCOUNT_2_PSID; __Secure-1PSIDTS=ACCOUNT_2_TS" }
+]
+```
 
 For single-cookie deployments, use the shortest practical cookie form: `__Secure-1PSID`, `__Secure-1PSIDTS`, and optional `SAPISID`. A fresh private-browser Gemini login that is closed after extracting these values tends to be more stable than copying a full everyday-browser cookie header. If a cold start falls back to an expired `__Secure-1PSIDTS`, the first authenticated request will try to rotate it. If Google rejects that rotation or returns no updated cookie, update the `GEMINI_COOKIE` secret manually.
 
@@ -359,7 +370,7 @@ The health route `GET /` remains unauthenticated so deployment probes can work w
 | Shared endpoint returns 401 | Send one configured `API_KEYS` value through `Authorization: Bearer`, `x-api-key`, or `x-goog-api-key`. |
 | Gemini returns empty output | Check whether `GEMINI_BL` still matches the current Gemini Web frontend. If Cloudflare egress is restricted, configure a compatible `GEMINI_ORIGIN`. |
 | Docker cannot reach the service | Check the `${PORT:-52389}:${PORT:-52389}` mapping and use the configured host port. |
-| You need multiple persistent accounts | Switch to [`gemini-account-pool`](https://github.com/Guardinary/web2gem/tree/gemini-account-pool) instead of placing several credentials in `GEMINI_COOKIE`. |
+| No pooled account is available | Open `/admin` to inspect cooling or manually disabled accounts. Authentication failures cool down automatically; a changed cookie or a manual reset makes an account immediately eligible. |
 
 ## Development
 
@@ -381,7 +392,7 @@ The build script emits two bundles:
 | `dist/worker.js`      | `src/index.ts`      | Production Worker deployed by Wrangler.         |
 | `dist/worker.test.js` | `src/test-index.ts` | Local test bundle with internal helper exports. |
 
-Maintainers run **Actions → Release Main Edition** for `main` releases and **Actions → Release Account Pool Edition** for `gemini-account-pool` releases. Both entrypoints are maintained on `main` and publish from the selected edition's immutable revision.
+Maintainers run **Actions → Release Main Edition** for `main` releases.
 
 ## Testing
 
@@ -443,7 +454,7 @@ Never commit Gemini cookies or API keys. Store secrets in Cloudflare Worker secr
 
 ## Acknowledgements
 
-This project is a fork of [Guardinary/web2gem](https://github.com/Guardinary/web2gem). All upstream behavior and architecture originate there; this fork adds targeted enhancements (notably the optional watermark-removal pipeline).
+Project source and releases are maintained at [silencoo/web2gem-plus](https://github.com/silencoo/web2gem-plus).
 
 - Watermark removal core vendored from [GargantuaX/gemini-watermark-remover](https://github.com/GargantuaX/gemini-watermark-remover) (see `src/gemini/client/watermark/vendor/`).
 

@@ -118,6 +118,21 @@ export function upstreamEmptyResponseError(
 	return err;
 }
 
+export function safeRedirectTarget(
+	location: unknown,
+	baseOrigin: unknown,
+): string {
+	const value = String(location || "").trim();
+	if (!value) return "";
+	try {
+		const target = new URL(value, String(baseOrigin || ""));
+		if (!/^https?:$/.test(target.protocol)) return "";
+		return `${target.origin}${target.pathname}`;
+	} catch (_) {
+		return "";
+	}
+}
+
 export function upstreamImageGenerationEmptyError(
 	status: unknown,
 	rawLength: number | null,
@@ -170,7 +185,7 @@ export function invalidGeminiCookieError(
 	const err: ErrorWithMetadata = new Error(
 		`Gemini rejected the selected account credentials (upstream HTTP ${status}). ` +
 			(reason ? `Diagnostic: ${reason}. ` : "") +
-			"Update GEMINI_COOKIE with valid, unexpired Gemini web session credentials.",
+			"Update GEMINI_COOKIE or GEMINI_COOKIES with valid, unexpired Gemini web session credentials.",
 	);
 	err.code = INVALID_GEMINI_COOKIE_CODE;
 	err.status = 401;
@@ -186,7 +201,7 @@ export function unverifiedGeminiCookieError(
 	const messageReason = cookieDiagnosticMessage(reason) || reason;
 	const err: ErrorWithMetadata = new Error(
 		`Could not verify the selected Gemini account credentials (${messageReason}). ` +
-			"Update GEMINI_COOKIE with valid, unexpired Gemini web session credentials.",
+			"Update GEMINI_COOKIE or GEMINI_COOKIES with valid, unexpired Gemini web session credentials.",
 	);
 	err.code = INVALID_GEMINI_COOKIE_CODE;
 	err.status = 401;

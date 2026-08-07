@@ -1,6 +1,12 @@
 export const VERSION = "1.1.1-worker";
 
-export type WorkerEnv = Partial<Record<keyof WorkerBindings, unknown>>;
+export type WorkerEnv = Partial<WorkerBindings>;
+
+export type GeminiCookieSeed = Readonly<{
+	label: string;
+	cookie: string;
+	sapisid: string;
+}>;
 
 export type RuntimeProfile = "worker" | "docker";
 
@@ -10,6 +16,7 @@ export type StaticRuntimeConfig = Readonly<{
 	upstream_socket: boolean;
 	default_model: string;
 	retry_attempts: number;
+	gemini_account_max_attempts: number;
 	retry_delay_sec: number;
 	request_timeout_sec: number;
 	request_body_max_bytes: number;
@@ -20,6 +27,8 @@ export type StaticRuntimeConfig = Readonly<{
 	current_tools_file_name: string;
 	generic_file_upload_max_bytes: number;
 	api_keys: readonly string[];
+	admin_password: string;
+	gemini_cookies: readonly GeminiCookieSeed[];
 	cookie: string;
 	sapisid: string;
 }>;
@@ -28,7 +37,57 @@ export type RuntimeExecutionContext = {
 	supports_authenticated_session?: boolean;
 	execution_ctx?: Pick<ExecutionContext, "waitUntil">;
 	runtime_profile?: RuntimeProfile;
+	gemini_session?: GeminiSessionLease;
+	gemini_rotation?: GeminiSessionRotation;
+	gemini_session_pool?: GeminiSessionPoolPort;
 };
+
+export type GeminiSessionLease = Readonly<{
+	account_id: string;
+	version: number;
+	cookie: string;
+	sapisid: string;
+	last_cookie_refresh_at_ms: number;
+}>;
+
+export type GeminiSessionRotation = Readonly<{
+	account_id: string;
+	version: number;
+	token: string;
+}>;
+
+export type GeminiRotationStart =
+	| Readonly<{
+			status: "acquired";
+			lease: GeminiSessionLease;
+			rotation: GeminiSessionRotation;
+	  }>
+	| Readonly<{ status: "updated"; lease: GeminiSessionLease }>
+	| Readonly<{ status: "busy" | "unavailable" }>;
+
+export type GeminiSessionPoolPort = {
+	beginRotation(lease: GeminiSessionLease): Promise<GeminiRotationStart>;
+	commitRotation(
+		rotation: GeminiSessionRotation,
+		cookie: string,
+		sapisid: string,
+	): Promise<GeminiSessionLease | null>;
+	abortRotation(rotation: GeminiSessionRotation): Promise<void>;
+	failRotation(
+		rotation: GeminiSessionRotation,
+		issue?: GeminiSessionFailureIssue,
+	): Promise<void>;
+	markFailure(
+		lease: GeminiSessionLease,
+		issue: GeminiSessionFailureIssue,
+	): Promise<void>;
+	markSuccess(lease: GeminiSessionLease): Promise<void>;
+	acquire(
+		excludeAccountIds?: readonly string[],
+	): Promise<GeminiSessionLease | null>;
+};
+
+export type GeminiSessionFailureIssue = "auth" | "rate_limit" | "transient";
 
 export type RuntimeConfig = StaticRuntimeConfig & RuntimeExecutionContext;
 
@@ -46,12 +105,15 @@ export function createRuntimeConfig(
 
 const DEFAULT_CONFIG = Object.freeze({
 	GEMINI_COOKIE: "",
+	GEMINI_COOKIES: "",
+	ADMIN_PASSWORD: "",
 	SAPISID: "",
 	GEMINI_BL: "boq_assistant-bard-web-server_20260709.09_p0",
 	GEMINI_ORIGIN: "https://gemini.google.com",
 	UPSTREAM_SOCKET: true,
 	DEFAULT_MODEL: "gemini-3.5-flash",
 	RETRY_ATTEMPTS: 3,
+	GEMINI_ACCOUNT_MAX_ATTEMPTS: 10,
 	RETRY_DELAY_SEC: 2,
 	REQUEST_TIMEOUT_SEC: 180,
 	REQUEST_BODY_MAX_BYTES: 16 * 1024 * 1024,
@@ -78,12 +140,15 @@ export class RuntimeConfigError extends Error {
 
 export const CONFIG_ENV_KEYS = [
 	"GEMINI_COOKIE",
+	"GEMINI_COOKIES",
+	"ADMIN_PASSWORD",
 	"SAPISID",
 	"GEMINI_BL",
 	"GEMINI_ORIGIN",
 	"UPSTREAM_SOCKET",
 	"DEFAULT_MODEL",
 	"RETRY_ATTEMPTS",
+	"GEMINI_ACCOUNT_MAX_ATTEMPTS",
 	"RETRY_DELAY_SEC",
 	"REQUEST_TIMEOUT_SEC",
 	"REQUEST_BODY_MAX_BYTES",
@@ -137,6 +202,11 @@ export function getConfig(env: WorkerEnv = DEFAULT_ENV): StaticRuntimeConfig {
 	}
 	const cfg: StaticRuntimeConfig = Object.freeze({
 		...parseCookieConfig(activeEnv),
+		admin_password: parseOptionalSecret(
+			"ADMIN_PASSWORD",
+			configValue(activeEnv, "ADMIN_PASSWORD", DEFAULT_CONFIG.ADMIN_PASSWORD),
+			4096,
+		),
 		gemini_bl: parseNonEmptyString(
 			"GEMINI_BL",
 			configValue(activeEnv, "GEMINI_BL", DEFAULT_CONFIG.GEMINI_BL),
@@ -160,6 +230,16 @@ export function getConfig(env: WorkerEnv = DEFAULT_ENV): StaticRuntimeConfig {
 			configValue(activeEnv, "RETRY_ATTEMPTS", DEFAULT_CONFIG.RETRY_ATTEMPTS),
 			1,
 			10,
+		),
+		gemini_account_max_attempts: parseStrictInteger(
+			"GEMINI_ACCOUNT_MAX_ATTEMPTS",
+			configValue(
+				activeEnv,
+				"GEMINI_ACCOUNT_MAX_ATTEMPTS",
+				DEFAULT_CONFIG.GEMINI_ACCOUNT_MAX_ATTEMPTS,
+			),
+			1,
+			100,
 		),
 		retry_delay_sec: parseStrictInteger(
 			"RETRY_DELAY_SEC",
@@ -267,7 +347,12 @@ function configValue(
 
 function parseCookieConfig(
 	env: WorkerEnv,
-): Pick<StaticRuntimeConfig, "cookie" | "sapisid"> {
+): Pick<StaticRuntimeConfig, "cookie" | "sapisid" | "gemini_cookies"> {
+	const poolValue = configValue(
+		env,
+		"GEMINI_COOKIES",
+		DEFAULT_CONFIG.GEMINI_COOKIES,
+	);
 	const cookieValue = configValue(
 		env,
 		"GEMINI_COOKIE",
@@ -289,6 +374,7 @@ function parseCookieConfig(
 			"must not be longer than 4096 characters",
 		);
 
+	const pooled = parseGeminiCookiePool(poolValue);
 	let cookie = cookieValue;
 	let sapisid = sapisidValue;
 	if (cookie.trim().startsWith("{")) {
@@ -308,7 +394,94 @@ function parseCookieConfig(
 		const match = /(?:^|;\s*)SAPISID=([^;]+)/.exec(cookie);
 		if (match?.[1]) sapisid = match[1];
 	}
-	return { cookie, sapisid };
+	const singleton = normalizeCookieSeed(cookie, sapisid, "Default");
+	const gemini_cookies = Object.freeze(
+		pooled.length ? pooled : singleton.cookie ? [singleton] : [],
+	);
+	const primary = gemini_cookies[0] || singleton;
+	return { cookie: primary.cookie, sapisid: primary.sapisid, gemini_cookies };
+}
+
+function parseGeminiCookiePool(value: unknown): GeminiCookieSeed[] {
+	if (value === "" || value === undefined || value === null) return [];
+	if (typeof value !== "string")
+		throw new RuntimeConfigError(
+			"GEMINI_COOKIES",
+			"must be a JSON array string",
+		);
+	if (value.length > 4 * 1024 * 1024)
+		throw new RuntimeConfigError(
+			"GEMINI_COOKIES",
+			"must not be longer than 4194304 characters",
+		);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch (_) {
+		throw new RuntimeConfigError("GEMINI_COOKIES", "must be valid JSON");
+	}
+	if (!Array.isArray(parsed) || parsed.length === 0)
+		throw new RuntimeConfigError(
+			"GEMINI_COOKIES",
+			"must be a non-empty JSON array",
+		);
+	if (parsed.length > 100)
+		throw new RuntimeConfigError(
+			"GEMINI_COOKIES",
+			"must contain at most 100 accounts",
+		);
+	return parsed.map((entry, index) => {
+		let normalized: Pick<StaticRuntimeConfig, "cookie" | "sapisid">;
+		let label = `Account ${index + 1}`;
+		if (typeof entry === "string") normalized = { cookie: entry, sapisid: "" };
+		else if (isConfigObject(entry)) {
+			normalized = cookieFromJsonConfig(entry);
+			label = configString(entry, "name", "label") || label;
+		} else
+			throw new RuntimeConfigError(
+				"GEMINI_COOKIES",
+				`entry ${index} must be a string or object`,
+			);
+		const seed = normalizeCookieSeed(
+			normalized.cookie,
+			normalized.sapisid,
+			label,
+		);
+		if (!seed.cookie)
+			throw new RuntimeConfigError(
+				"GEMINI_COOKIES",
+				`entry ${index} must contain a cookie`,
+			);
+		return Object.freeze(seed);
+	});
+}
+
+function normalizeCookieSeed(
+	cookie: string,
+	sapisid: string,
+	label: string,
+): GeminiCookieSeed {
+	let resolvedSapisid = sapisid;
+	if (cookie && !resolvedSapisid) {
+		const match = /(?:^|;\s*)SAPISID=([^;]+)/.exec(cookie);
+		if (match?.[1]) resolvedSapisid = match[1];
+	}
+	return { label: label.slice(0, 120), cookie, sapisid: resolvedSapisid };
+}
+
+function parseOptionalSecret(
+	setting: string,
+	value: unknown,
+	maxLength: number,
+): string {
+	if (typeof value !== "string")
+		throw new RuntimeConfigError(setting, "must be a string");
+	if (value.length > maxLength)
+		throw new RuntimeConfigError(
+			setting,
+			`must be at most ${maxLength} characters`,
+		);
+	return value;
 }
 
 function isConfigObject(value: unknown): value is Record<string, unknown> {

@@ -1872,6 +1872,34 @@ export const cases = [
 		},
 	],
 	[
+		"uses the SAPISID returned by RotateCookies instead of a stale override",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			const cfg = {
+				cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old; SAPISID=old-sapi",
+				sapisid: "old-sapi",
+				request_timeout_sec: 180,
+				upstream_socket: false,
+				log_requests: false,
+			};
+			await withFetch(
+				async () =>
+					new Response("", {
+						status: 200,
+						headers: {
+							"set-cookie":
+								"__Secure-1PSIDTS=new; Path=/; Secure, SAPISID=new-sapi; Path=/; Secure",
+						},
+					}),
+				async () => {
+					const rotated = await mod.rotateGeminiCookieForRetry(cfg);
+					assert.equal(rotated.sapisid, "new-sapi");
+					assert.match(rotated.cookie, /SAPISID=new-sapi/);
+				},
+			);
+		},
+	],
+	[
 		"debounces failed cookie rotation after upstream rejection",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();
@@ -2139,6 +2167,26 @@ export const cases = [
 		},
 	],
 	[
+		"redacts redirect credentials, query, and fragment from diagnostics",
+		async () => {
+			assert.equal(
+				mod.safeRedirectTarget(
+					"https://user:secret@example.test/login/path?token=secret#fragment",
+					"https://gemini.example",
+				),
+				"https://example.test/login/path",
+			);
+			assert.equal(
+				mod.safeRedirectTarget("/app?auth=secret", "https://gemini.example"),
+				"https://gemini.example/app",
+			);
+			assert.equal(
+				mod.safeRedirectTarget("javascript:alert(1)", "https://gemini.example"),
+				"",
+			);
+		},
+	],
+	[
 		"invalidates page token cache after cookie rotation",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();
@@ -2259,6 +2307,52 @@ export const cases = [
 		},
 	],
 	[
+		"uses the current app page build label for the first cookie RPC",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			mod.resetGeminiUploadCachesForTest();
+			mod.resetGeminiBuildLabelCacheForTest();
+			const cfg = {
+				gemini_origin: "https://gemini.example",
+				gemini_bl: "stale-configured-bl",
+				cookie: "__Secure-1PSID=psid; SAPISID=sapi",
+				sapisid: "sapi",
+				request_timeout_sec: 180,
+				retry_attempts: 1,
+				retry_delay_sec: 0,
+				current_input_file_min_bytes: 1000000,
+				upstream_socket: false,
+				log_requests: false,
+			};
+			const cache = createMemoryCache();
+			await withCaches(cache, async () => {
+				await withFetch(
+					async (url) => {
+						const href = String(url);
+						if (href === "https://gemini.example/app") {
+							return new Response(
+								'{"SNlM0e":"at-test","cfb2h":"fresh-app-bl"}',
+								{ status: 200 },
+							);
+						}
+						assert.match(href, /StreamGenerate/);
+						assert.match(href, /bl=fresh-app-bl/);
+						assert.doesNotMatch(href, /stale-configured-bl/);
+						return new Response(wrbLine(["fresh first request"]), {
+							status: 200,
+						});
+					},
+					async () => {
+						assert.equal(
+							await mod.generate(cfg, "prompt", 1, 4, null, null),
+							"fresh first request",
+						);
+					},
+				);
+			});
+		},
+	],
+	[
 		"rejects cookie requests when Gemini page auth token is missing",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();
@@ -2345,6 +2439,68 @@ export const cases = [
 				),
 				true,
 			);
+		},
+	],
+	[
+		"uses a separate account budget to fail over beyond normal retries",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			mod.resetGeminiUploadCachesForTest();
+			mod.resetGeminiBuildLabelCacheForTest();
+			const leases = ["one", "two", "three"].map((id, index) => ({
+				account_id: id,
+				version: 1,
+				cookie: `__Secure-1PSID=${id}`,
+				sapisid: "",
+				last_cookie_refresh_at_ms: Date.now(),
+				index,
+			}));
+			const failures = [];
+			const pool = {
+				beginRotation: async () => ({ status: "unavailable" }),
+				commitRotation: async () => null,
+				abortRotation: async () => {},
+				failRotation: async () => {},
+				markFailure: async (lease, issue) => {
+					failures.push([lease.account_id, issue]);
+				},
+				markSuccess: async () => {},
+				acquire: async (excluded = []) =>
+					leases.find((lease) => !excluded.includes(lease.account_id)) || null,
+			};
+			const cfg = baseGeminiClientConfig({
+				cookie: leases[0].cookie,
+				gemini_session: leases[0],
+				gemini_session_pool: pool,
+				gemini_account_max_attempts: 3,
+				retry_attempts: 1,
+			});
+			let streamCalls = 0;
+			await withFetch(
+				async (url, init = {}) => {
+					const href = String(url);
+					if (href === "https://gemini.example/app")
+						return new Response('{"SNlM0e":"at-test"}', { status: 200 });
+					assert.match(href, /StreamGenerate/);
+					streamCalls++;
+					if (!String(init.headers?.Cookie).includes("three"))
+						return new Response("rejected", { status: 401 });
+					return new Response(wrbLine(["third account works"]), {
+						status: 200,
+					});
+				},
+				async () => {
+					assert.equal(
+						await mod.generate(cfg, "prompt", 1, 4, null, null),
+						"third account works",
+					);
+				},
+			);
+			assert.equal(streamCalls, 3);
+			assert.deepEqual(failures, [
+				["one", "auth"],
+				["two", "auth"],
+			]);
 		},
 	],
 	[

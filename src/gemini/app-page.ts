@@ -3,6 +3,8 @@ export type GeminiAppPageTokens = {
 	at?: string;
 	/** Gemini `FdrFJe` session id used by batchexecute (`f.sid`). */
 	sid?: string;
+	/** Current Gemini web build label (`cfb2h`) used by RPC URLs. */
+	build_label?: string;
 };
 
 type TextStreamResponse = {
@@ -15,6 +17,7 @@ const APP_PAGE_TOKEN_MARKERS: QuotedMarkerSpec<keyof GeminiAppPageTokens>[] = [
 	{ key: "push_id", marker: '"qKIAYe":"' },
 	{ key: "at", marker: '"SNlM0e":"' },
 	{ key: "sid", marker: '"FdrFJe":"' },
+	{ key: "build_label", marker: '"cfb2h":"' },
 ];
 const PUSH_ID_MARKER: QuotedMarkerSpec<"push_id"> = {
 	key: "push_id",

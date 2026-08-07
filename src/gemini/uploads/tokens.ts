@@ -8,6 +8,7 @@ import { httpFetch } from "../transport";
 import { createOriginScopedStringCache } from "../cache";
 import type { RuntimeConfig } from "../../config";
 import { configWithFreshGeminiCookie } from "../cookies";
+import { setCachedGeminiBuildLabel } from "../client/retry";
 import { errorLogSummary, log } from "../../shared/runtime";
 import { contentPushUploadError } from "./errors";
 
@@ -75,6 +76,8 @@ export async function getPageTokensForConfig(
 				},
 			);
 			Object.assign(tokens, await extractGeminiAppPageTokens(resp));
+			if (tokens.build_label)
+				await setCachedGeminiBuildLabel(activeCfg, tokens.build_label);
 			if (!hasAnyPageToken(tokens)) {
 				log(
 					activeCfg,
