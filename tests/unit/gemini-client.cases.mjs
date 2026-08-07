@@ -1810,6 +1810,26 @@ export const cases = [
 		},
 	],
 	[
+		"reloads active Gemini cookie when only 1PSIDTS changes",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			mod.configWithActiveGeminiCookie({
+				cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old; SAPISID=sapi",
+				sapisid: "",
+			});
+
+			const active = mod.configWithActiveGeminiCookie({
+				cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=new; SAPISID=sapi",
+				sapisid: "",
+			});
+
+			assert.equal(
+				active.cookie,
+				"__Secure-1PSID=psid; __Secure-1PSIDTS=new; SAPISID=sapi",
+			);
+		},
+	],
+	[
 		"rotates Gemini cookie with safe RotateCookies headers",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();

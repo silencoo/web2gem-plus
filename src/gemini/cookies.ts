@@ -292,10 +292,11 @@ function stateFromCookie(
 
 function cookieSourceKey(cfg: RuntimeConfig): string {
 	const secure1psid = extractCookieValue(cfg.cookie, "__Secure-1PSID");
+	const secure1psidts = extractCookieValue(cfg.cookie, "__Secure-1PSIDTS");
 	const sapisid = String(
 		cfg.sapisid || extractCookieValue(cfg.cookie, "SAPISID") || "",
 	);
-	return `${secure1psid || cfg.cookie || ""}\x00${sapisid}`;
+	return `${secure1psid || cfg.cookie || ""}\x00${secure1psidts}\x00${sapisid}`;
 }
 
 export function resetActiveGeminiCookieForTest(): void {
