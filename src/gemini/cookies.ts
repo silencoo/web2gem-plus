@@ -126,12 +126,10 @@ export async function configWithFreshGeminiCookie(
 ): Promise<RuntimeConfig> {
 	if (cfg.gemini_rotation) return cfg;
 	if (cfg.gemini_session_pool && cfg.gemini_session) {
-		if (
-			Date.now() - cfg.gemini_session.last_cookie_refresh_at_ms <=
-			COOKIE_ROTATE_STALE_MS
-		)
-			return cfg;
-		return (await rotatePooledGeminiCookie(cfg, false)) || cfg;
+		// A pooled credential is refreshed only after an authenticated request is
+		// actually rejected. Proactive RotateCookies calls can stall a healthy
+		// request and turn a transient rotation timeout into a stale fenced lease.
+		return cfg;
 	}
 	const state = ensureActiveCookieState(cfg);
 	if (!state) return cfg;
