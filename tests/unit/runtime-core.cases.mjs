@@ -516,13 +516,20 @@ export const cases = [
 		},
 	],
 	[
-		"parses and validates non-persistent Gemini cookie configuration",
+		"normalizes GEMINI_COOKIE into a singleton persistent account pool",
 		async () => {
 			const raw = mod.getConfig({
 				GEMINI_COOKIE: "__Secure-1PSID=psid; SAPISID=raw-sapisid",
 				SAPISID: "",
 			});
 			assert.equal(raw.sapisid, "raw-sapisid");
+			assert.deepEqual(raw.gemini_cookies, [
+				{
+					label: "Default",
+					cookie: "__Secure-1PSID=psid; SAPISID=raw-sapisid",
+					sapisid: "raw-sapisid",
+				},
+			]);
 			assert.equal(
 				mod.createRuntimeConfig(raw).supports_authenticated_session,
 				true,
@@ -572,6 +579,68 @@ export const cases = [
 					/invalid runtime configuration/,
 				);
 			}
+		},
+	],
+	[
+		"keeps a rotated GEMINI_COOKIE across Durable Object cold starts",
+		async () => {
+			let stored;
+			const storage = {
+				transaction: async (callback) => callback(storage),
+				get: async () => stored,
+				put: async (_key, value) => {
+					stored = structuredClone(value);
+				},
+			};
+			const durableObjectNames = [];
+			const envFor = (pool) => ({
+				GEMINI_COOKIE:
+					"__Secure-1PSID=single; __Secure-1PSIDTS=before-rotation",
+				GEMINI_SESSION_POOL: {
+					getByName(name) {
+						durableObjectNames.push(name);
+						return {
+							fetch(input, init) {
+								return pool.fetch(new Request(input, init));
+							},
+						};
+					},
+				},
+			});
+
+			const firstEnv = envFor(new mod.GeminiSessionPool({ storage }));
+			const first = await mod.configWithPooledGeminiSession(
+				mod.createRuntimeConfig(mod.getConfig(firstEnv)),
+				firstEnv,
+			);
+			assert.match(first.cookie, /__Secure-1PSIDTS=before-rotation/);
+			const begun = await first.gemini_session_pool.beginRotation(
+				first.gemini_session,
+			);
+			assert.equal(begun.status, "acquired");
+			const rotated = await first.gemini_session_pool.commitRotation(
+				begun.rotation,
+				"__Secure-1PSID=single; __Secure-1PSIDTS=after-rotation",
+				"",
+			);
+			assert.match(rotated.cookie, /__Secure-1PSIDTS=after-rotation/);
+
+			// A new object instance models an isolate restart while sharing the
+			// Durable Object's persistent storage.
+			const secondEnv = envFor(new mod.GeminiSessionPool({ storage }));
+			const freshSecretConfig = mod.createRuntimeConfig(
+				mod.getConfig(secondEnv),
+			);
+			assert.match(
+				freshSecretConfig.cookie,
+				/__Secure-1PSIDTS=before-rotation/,
+			);
+			const second = await mod.configWithPooledGeminiSession(
+				freshSecretConfig,
+				secondEnv,
+			);
+			assert.match(second.cookie, /__Secure-1PSIDTS=after-rotation/);
+			assert.deepEqual(durableObjectNames, ["default", "default"]);
 		},
 	],
 	[

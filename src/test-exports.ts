@@ -1,6 +1,9 @@
 // Internal compatibility surface used by local unit and smoke tests.
 export { handleApplicationRequest } from "./app";
-export { GeminiSessionPool } from "./gemini/session-pool";
+export {
+	GeminiSessionPool,
+	configWithPooledGeminiSession,
+} from "./gemini/session-pool";
 export {
 	buildHeaders,
 	buildPayload,

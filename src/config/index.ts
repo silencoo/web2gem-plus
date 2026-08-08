@@ -394,6 +394,8 @@ function parseCookieConfig(
 		const match = /(?:^|;\s*)SAPISID=([^;]+)/.exec(cookie);
 		if (match?.[1]) sapisid = match[1];
 	}
+	// Treat the legacy single-cookie setting as a one-account pool so Workers
+	// use the same Durable Object rotation path for both configuration forms.
 	const singleton = normalizeCookieSeed(cookie, sapisid, "Default");
 	const gemini_cookies = Object.freeze(
 		pooled.length ? pooled : singleton.cookie ? [singleton] : [],
