@@ -27,6 +27,7 @@ export type StaticRuntimeConfig = Readonly<{
 	current_tools_file_name: string;
 	generic_file_upload_max_bytes: number;
 	api_keys: readonly string[];
+	admin_username: string;
 	admin_password: string;
 	gemini_cookies: readonly GeminiCookieSeed[];
 	cookie: string;
@@ -106,6 +107,7 @@ export function createRuntimeConfig(
 const DEFAULT_CONFIG = Object.freeze({
 	GEMINI_COOKIE: "",
 	GEMINI_COOKIES: "",
+	ADMIN_USERNAME: "admin",
 	ADMIN_PASSWORD: "",
 	SAPISID: "",
 	GEMINI_BL: "boq_assistant-bard-web-server_20260709.09_p0",
@@ -141,6 +143,7 @@ export class RuntimeConfigError extends Error {
 export const CONFIG_ENV_KEYS = [
 	"GEMINI_COOKIE",
 	"GEMINI_COOKIES",
+	"ADMIN_USERNAME",
 	"ADMIN_PASSWORD",
 	"SAPISID",
 	"GEMINI_BL",
@@ -202,6 +205,11 @@ export function getConfig(env: WorkerEnv = DEFAULT_ENV): StaticRuntimeConfig {
 	}
 	const cfg: StaticRuntimeConfig = Object.freeze({
 		...parseCookieConfig(activeEnv),
+		admin_username: parseNonEmptyString(
+			"ADMIN_USERNAME",
+			configValue(activeEnv, "ADMIN_USERNAME", DEFAULT_CONFIG.ADMIN_USERNAME),
+			120,
+		),
 		admin_password: parseOptionalSecret(
 			"ADMIN_PASSWORD",
 			configValue(activeEnv, "ADMIN_PASSWORD", DEFAULT_CONFIG.ADMIN_PASSWORD),
@@ -422,16 +430,17 @@ function parseGeminiCookiePool(value: unknown): GeminiCookieSeed[] {
 	} catch (_) {
 		throw new RuntimeConfigError("GEMINI_COOKIES", "must be valid JSON");
 	}
+	return normalizeGeminiCookieAccounts(parsed);
+}
+
+export function normalizeGeminiCookieAccounts(
+	parsed: unknown,
+	setting = "GEMINI_COOKIES",
+): GeminiCookieSeed[] {
 	if (!Array.isArray(parsed) || parsed.length === 0)
-		throw new RuntimeConfigError(
-			"GEMINI_COOKIES",
-			"must be a non-empty JSON array",
-		);
+		throw new RuntimeConfigError(setting, "must be a non-empty JSON array");
 	if (parsed.length > 100)
-		throw new RuntimeConfigError(
-			"GEMINI_COOKIES",
-			"must contain at most 100 accounts",
-		);
+		throw new RuntimeConfigError(setting, "must contain at most 100 accounts");
 	return parsed.map((entry, index) => {
 		let normalized: Pick<StaticRuntimeConfig, "cookie" | "sapisid">;
 		let label = `Account ${index + 1}`;
@@ -441,7 +450,7 @@ function parseGeminiCookiePool(value: unknown): GeminiCookieSeed[] {
 			label = configString(entry, "name", "label") || label;
 		} else
 			throw new RuntimeConfigError(
-				"GEMINI_COOKIES",
+				setting,
 				`entry ${index} must be a string or object`,
 			);
 		const seed = normalizeCookieSeed(
@@ -451,8 +460,18 @@ function parseGeminiCookiePool(value: unknown): GeminiCookieSeed[] {
 		);
 		if (!seed.cookie)
 			throw new RuntimeConfigError(
-				"GEMINI_COOKIES",
+				setting,
 				`entry ${index} must contain a cookie`,
+			);
+		if (seed.cookie.length > 1024 * 1024)
+			throw new RuntimeConfigError(
+				setting,
+				`entry ${index} cookie must not be longer than 1048576 characters`,
+			);
+		if (seed.sapisid.length > 4096)
+			throw new RuntimeConfigError(
+				setting,
+				`entry ${index} SAPISID must not be longer than 4096 characters`,
 			);
 		return Object.freeze(seed);
 	});

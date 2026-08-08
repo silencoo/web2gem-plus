@@ -287,9 +287,10 @@ Configuration defaults live in `src/config/index.ts`. Cloudflare Worker environm
 | Variable                        | Default                     | Description                                                                                                                                                                                                      |
 | ------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `API_KEYS`                      | empty                       | Comma-separated or JSON-array API keys. Empty disables auth. Empty members, non-string members, and duplicates are rejected.                                                                                                                                                     |
-| `ADMIN_PASSWORD`                | empty                       | Password for `/admin` and `/admin/api/accounts`. The username is always `admin`; leaving this empty disables the admin routes with HTTP 404. Configure it as a secret. |
+| `ADMIN_USERNAME`                | `admin`                     | Username for `/admin/login`. The login page never pre-fills or returns this value. Change it from the default and configure it as a secret for shared deployments. |
+| `ADMIN_PASSWORD`                | empty                       | Password for the dedicated `/admin/login` page. A successful login creates a signed, HttpOnly, SameSite=Strict 12-hour session; leaving this empty disables all admin routes with HTTP 404. Configure it as a secret. |
 | `GEMINI_COOKIE`                 | empty                       | Raw Gemini cookie string; JSON with `cookie` and optional `sapisid`; or JSON with `secure_1psid`, `secure_1psidts`, and optional `sapisid`. Needed for real Pro routing, large-context text attachments, and signed-in Gemini Web behavior. |
-| `GEMINI_COOKIES`                | empty                       | JSON array of cookie strings or cookie objects. Takes precedence over `GEMINI_COOKIE` and enables round-robin account selection. Configure it as a secret. |
+| `GEMINI_COOKIES`                | empty                       | JSON array of cookie strings or cookie objects. Takes precedence over `GEMINI_COOKIE` and initializes the account pool. The admin UI can later persist a managed account list and routing strategy in the Durable Object. Configure it as a secret. |
 | `SAPISID`                       | empty                       | Optional SAPISID override. If empty, it is extracted from `GEMINI_COOKIE` when possible.                                                                                                                         |
 | `GEMINI_BL`                     | bundled value               | Gemini Web build label used by upstream requests. Update if Gemini Web changes and upstream responses become empty.                                                                                              |
 | `GEMINI_ORIGIN`                 | `https://gemini.google.com` | Upstream origin. Can point to your own forwarding service or proxy endpoint while preserving expected request semantics.                                                                                         |
@@ -310,19 +311,34 @@ Configuration defaults live in `src/config/index.ts`. Cloudflare Worker environm
 When managing a Worker through the Wrangler CLI, optional secrets can be set with:
 
 - Set `API_KEYS` for shared deployments. If it is empty, auth is disabled.
-- Set `ADMIN_PASSWORD` to enable the account-pool status page and management API.
+- Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` to enable the account-pool status page and management API with private credentials.
 - Set `GEMINI_COOKIE` when Pro routing, image generation/editing, large-context text attachments, or other signed-in Gemini Web behavior is needed.
 - Or set `GEMINI_COOKIES` to a JSON array when several accounts should share requests.
 
 ```sh
 wrangler secret put API_KEYS
+wrangler secret put ADMIN_USERNAME
 wrangler secret put ADMIN_PASSWORD
 wrangler secret put GEMINI_COOKIE
 # alternatively:
 wrangler secret put GEMINI_COOKIES
 ```
 
-After setting `ADMIN_PASSWORD`, open `/admin` and sign in through HTTP Basic Auth with username `admin`. The page shows only account labels, redacted identifiers, health, counters, and timestamps. It never returns Cookie or SAPISID values. `GET /admin/api/accounts` returns the same redacted data; `PATCH /admin/api/accounts` accepts `{ "account_id": "...", "action": "enable|disable|reset" }`.
+After setting `ADMIN_USERNAME` and `ADMIN_PASSWORD`, open `/admin` and sign in on the dedicated login page. Neither credential is pre-filled or disclosed by the page, and an invalid login returns the same generic error for either field. The browser receives a signed, HttpOnly, SameSite=Strict session cookie that expires after 12 hours; changing either credential invalidates existing sessions. State-changing admin requests are restricted to the deployment's own origin.
+
+Login failures are tracked by a one-way hash of the Cloudflare client IP in the Durable Object. The fifth consecutive failure starts a 30-second block; additional failures double the delay up to 15 minutes. A successful login clears that client's failure state. Deployments without the Durable Object binding use process-local fallback state.
+
+The account page supports append/replace JSON imports, write-only credential replacement, label changes, reordering, and bulk enable/disable/reset/delete operations. Imports use a mandatory preview step that reports input, add, update, removal, duplicate, and format-error counts before the confirmation write. Cookie and SAPISID values are accepted only on writes: the page, preview, account list API, mutation responses, and generated HTML/JavaScript never return them. The first account-list mutation creates a Durable Object-managed snapshot from the currently active credentials, so later secret changes do not silently overwrite admin-managed accounts. Use **Restore Secret configuration** to discard that managed list and resume `GEMINI_COOKIE` / `GEMINI_COOKIES` as the source of truth.
+
+Each account also has a **Test** action. It fetches the Gemini application page with that account and checks for the authenticated page token, returning only availability, latency, normalized issue type, and HTTP status. It does not send a model prompt or expose the page body or credentials.
+
+Routing can be changed from the page without redeploying:
+
+- **Round robin** distributes requests across eligible accounts in order.
+- **Fixed priority** always selects the first eligible account, making list order significant.
+- **Least used** selects the eligible account with the lowest cumulative request count.
+
+The selected strategy and admin-managed account list persist in `GEMINI_SESSION_POOL`. Without a Durable Object binding, the same controls work only for the lifetime of the current process/isolate.
 
 When a configured cookie contains `__Secure-1PSID`, the Worker lazily calls Google's `RotateCookies` endpoint when the cookie is stale or an authenticated upstream request fails. Refreshed credentials are committed to the `GEMINI_SESSION_POOL` Durable Object with compare-and-swap versioning, so a cold isolate reads the latest stored value instead of reverting to an older secret. Changing the secret replaces the corresponding stored account and re-enables it.
 

@@ -10,6 +10,7 @@ services:
       PORT: "${PORT:-52389}"
       UPSTREAM_SOCKET: "${UPSTREAM_SOCKET:-false}"
       API_KEYS: "${API_KEYS:-}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
       GEMINI_COOKIE: "${GEMINI_COOKIE:-}"
       GEMINI_COOKIES: "${GEMINI_COOKIES:-}"

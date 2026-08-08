@@ -472,6 +472,8 @@ export const cases = [
 				{ GEMINI_ORIGIN: "https://user:secret@example.test/path" },
 				{ API_KEYS: 123 },
 				{ API_KEYS: [null] },
+				{ ADMIN_USERNAME: 123 },
+				{ ADMIN_USERNAME: "x".repeat(121) },
 			]) {
 				assert.throws(
 					() => mod.getConfig(env),
@@ -723,6 +725,130 @@ export const cases = [
 			} finally {
 				Date.now = originalNow;
 			}
+		},
+	],
+	[
+		"persists managed accounts and applies configurable routing strategies",
+		async () => {
+			let stored;
+			const storage = {
+				transaction: async (callback) => callback(storage),
+				get: async () => stored,
+				put: async (_key, value) => {
+					stored = structuredClone(value);
+				},
+			};
+			let pool = new mod.GeminiSessionPool({ storage });
+			const seeds = [
+				{
+					label: "Primary",
+					cookie: "__Secure-1PSID=priority-one",
+					sapisid: "",
+				},
+				{
+					label: "Backup",
+					cookie: "__Secure-1PSID=least-used-two",
+					sapisid: "",
+				},
+			];
+			const call = async (path, body) => {
+				const response = await pool.fetch(
+					new Request(`https://pool.test${path}`, {
+						method: "POST",
+						body: JSON.stringify(body),
+					}),
+				);
+				assert.equal(response.status, 200);
+				return response.json();
+			};
+
+			const initial = await call("/admin-snapshot", { seeds });
+			assert.equal(initial.configuration_source, "environment");
+			assert.equal(initial.routing_strategy, "round_robin");
+
+			const managedSecret = "__Secure-1PSID=managed-three";
+			const imported = await call("/accounts/import", {
+				seeds,
+				accounts: [
+					{
+						label: "Managed",
+						cookie: managedSecret,
+						sapisid: "private-sapisid",
+					},
+				],
+				mode: "append",
+			});
+			assert.equal(imported.configuration_source, "managed");
+			assert.equal(imported.accounts.length, 3);
+			assert.doesNotMatch(
+				JSON.stringify(imported),
+				/managed-three|private-sapisid/,
+			);
+
+			const prioritized = await call("/routing-strategy", {
+				seeds,
+				strategy: "priority",
+			});
+			const firstId = prioritized.accounts[0].account_id;
+			assert.equal((await call("/acquire", { seeds })).account_id, firstId);
+			assert.equal((await call("/acquire", { seeds })).account_id, firstId);
+
+			const managedId = prioritized.accounts.find(
+				(account) => account.label === "Managed",
+			).account_id;
+			const reorderedIds = [
+				managedId,
+				...prioritized.accounts
+					.map((account) => account.account_id)
+					.filter((accountId) => accountId !== managedId),
+			];
+			const reordered = await call("/accounts/reorder", {
+				seeds,
+				account_ids: reorderedIds,
+			});
+			assert.equal(reordered.accounts[0].account_id, managedId);
+
+			// A fresh class instance models a Durable Object isolate restart. The
+			// managed list and strategy remain available even without env cookies.
+			pool = new mod.GeminiSessionPool({ storage });
+			const persisted = await call("/admin-snapshot", { seeds: [] });
+			assert.equal(persisted.configuration_source, "managed");
+			assert.equal(persisted.routing_strategy, "priority");
+			assert.doesNotMatch(JSON.stringify(persisted), /managed-three/);
+
+			const managedEnv = {
+				GEMINI_SESSION_POOL: {
+					getByName() {
+						return {
+							fetch(input, init) {
+								return pool.fetch(new Request(input, init));
+							},
+						};
+					},
+				},
+			};
+			const managedConfig = await mod.configWithPooledGeminiSession(
+				mod.createRuntimeConfig(mod.getConfig(managedEnv)),
+				managedEnv,
+			);
+			assert.equal(managedConfig.gemini_session.account_id, managedId);
+			assert.equal(managedConfig.cookie, managedSecret);
+
+			await call("/routing-strategy", { seeds: [], strategy: "least_used" });
+			const leastUsed = await call("/acquire", { seeds: [] });
+			assert.equal(
+				leastUsed.account_id,
+				prioritized.accounts.find((account) => account.label === "Backup")
+					.account_id,
+			);
+
+			const restored = await call("/restore-environment", { seeds });
+			assert.equal(restored.configuration_source, "environment");
+			assert.equal(restored.accounts.length, 2);
+			assert.equal(
+				restored.accounts.some((account) => account.account_id === managedId),
+				false,
+			);
 		},
 	],
 	[
@@ -1013,11 +1139,22 @@ export const cases = [
 		},
 	],
 	[
-		"protects the redacted admin account page and API with ADMIN_PASSWORD",
+		"uses a dedicated admin login and never returns managed account cookies",
 		async () => {
 			const execution = { waitUntil() {} };
+			let stored;
+			const storage = {
+				transaction: async (callback) => callback(storage),
+				get: async () => stored,
+				put: async (_key, value) => {
+					stored = structuredClone(value);
+				},
+			};
+			const pool = new mod.GeminiSessionPool({ storage });
 			const env = {
+				ADMIN_USERNAME: "private-operator",
 				ADMIN_PASSWORD: "admin-secret",
+				UPSTREAM_SOCKET: "false",
 				API_KEYS: "unrelated-public-api-key",
 				GEMINI_COOKIES: JSON.stringify([
 					{
@@ -1029,8 +1166,17 @@ export const cases = [
 						cookie: "__Secure-1PSID=private-cookie-two",
 					},
 				]),
+				GEMINI_SESSION_POOL: {
+					getByName(name) {
+						assert.equal(name, "default");
+						return {
+							fetch(input, init) {
+								return pool.fetch(new Request(input, init));
+							},
+						};
+					},
+				},
 			};
-			const auth = `Basic ${btoa("admin:admin-secret")}`;
 			const request = (path, options = {}) =>
 				mod.handleApplicationRequest(
 					new Request(`https://worker.example${path}`, options),
@@ -1038,12 +1184,134 @@ export const cases = [
 					execution,
 				);
 
-			const challenge = await request("/admin");
-			assert.equal(challenge.status, 401);
-			assert.match(challenge.headers.get("www-authenticate"), /Basic/);
+			const redirect = await request("/admin");
+			assert.equal(redirect.status, 303);
+			assert.equal(redirect.headers.get("location"), "/admin/login");
+			assert.equal(redirect.headers.get("www-authenticate"), null);
+
+			const loginPage = await request("/admin/login");
+			assert.equal(loginPage.status, 200);
+			const loginHtml = await loginPage.text();
+			assert.match(loginHtml, /登录账号池后台/);
+			assert.match(
+				loginPage.headers.get("content-security-policy"),
+				/script-src 'self'/,
+			);
+			assert.doesNotMatch(
+				loginPage.headers.get("content-security-policy"),
+				/unsafe-inline/,
+			);
+			assert.match(loginHtml, /login-error-dialog/);
+			assert.match(loginHtml, /\/admin\/assets\/login\.js/);
+			assert.match(loginHtml, /id="username" name="username"/);
+			assert.doesNotMatch(
+				loginHtml,
+				/value="admin"|id="username"[^>]+disabled/,
+			);
+			const loginScript = await request("/admin/assets/login.js");
+			assert.equal(loginScript.status, 200);
+			assert.match(await loginScript.text(), /用户名或密码不正确/);
+
+			const rejected = await request("/admin/login", {
+				method: "POST",
+				headers: {
+					"content-type": "application/x-www-form-urlencoded",
+					origin: "https://worker.example",
+				},
+				body: "username=private-operator&password=wrong",
+			});
+			assert.equal(rejected.status, 401);
+			assert.equal(rejected.headers.get("www-authenticate"), null);
+			assert.match(await rejected.text(), /密码不正确/);
+
+			const rejectedJson = await request("/admin/login", {
+				method: "POST",
+				headers: {
+					accept: "application/json",
+					"content-type": "application/x-www-form-urlencoded",
+					origin: "https://worker.example",
+				},
+				body: "username=wrong-operator&password=admin-secret",
+			});
+			assert.equal(rejectedJson.status, 401);
+			assert.deepEqual(await rejectedJson.json(), {
+				error: "invalid_credentials",
+			});
+
+			for (let attempt = 1; attempt <= 5; attempt++) {
+				const limited = await request("/admin/login", {
+					method: "POST",
+					headers: {
+						accept: "application/json",
+						"cf-connecting-ip": "203.0.113.9",
+						"content-type": "application/x-www-form-urlencoded",
+						origin: "https://worker.example",
+					},
+					body: "username=private-operator&password=wrong",
+				});
+				assert.equal(limited.status, attempt < 5 ? 401 : 429);
+				if (attempt === 5) {
+					assert.equal(limited.headers.get("retry-after"), "30");
+					assert.deepEqual(await limited.json(), {
+						error: "login_rate_limited",
+						retry_after_seconds: 30,
+					});
+				}
+			}
+			const stillLimited = await request("/admin/login", {
+				method: "POST",
+				headers: {
+					accept: "application/json",
+					"cf-connecting-ip": "203.0.113.9",
+					"content-type": "application/x-www-form-urlencoded",
+					origin: "https://worker.example",
+				},
+				body: "username=private-operator&password=admin-secret",
+			});
+			assert.equal(stillLimited.status, 429);
+
+			const ajaxLogin = await request("/admin/login", {
+				method: "POST",
+				headers: {
+					accept: "application/json",
+					"content-type": "application/x-www-form-urlencoded",
+					origin: "https://worker.example",
+				},
+				body: "username=private-operator&password=admin-secret",
+			});
+			assert.equal(ajaxLogin.status, 204);
+			assert.match(
+				ajaxLogin.headers.get("set-cookie") || "",
+				/web2gem_admin_session=/,
+			);
+
+			const login = await request("/admin/login", {
+				method: "POST",
+				headers: {
+					"content-type": "application/x-www-form-urlencoded",
+					origin: "https://worker.example",
+				},
+				body: "username=private-operator&password=admin-secret",
+			});
+			assert.equal(login.status, 303);
+			assert.equal(login.headers.get("location"), "/admin");
+			const setCookie = login.headers.get("set-cookie") || "";
+			assert.match(setCookie, /web2gem_admin_session=/);
+			assert.match(setCookie, /HttpOnly/);
+			assert.match(setCookie, /SameSite=Strict/);
+			assert.match(setCookie, /Secure/);
+			assert.doesNotMatch(setCookie, /admin-secret/);
+			const sessionCookie = setCookie.split(";")[0];
+			const sessionHeaders = { cookie: sessionCookie };
+			env.ADMIN_USERNAME = "changed-operator";
+			const invalidated = await request("/admin/api/accounts", {
+				headers: sessionHeaders,
+			});
+			assert.equal(invalidated.status, 401);
+			env.ADMIN_USERNAME = "private-operator";
 
 			const page = await request("/admin", {
-				headers: { authorization: auth },
+				headers: sessionHeaders,
 			});
 			assert.equal(page.status, 200);
 			assert.match(
@@ -1051,10 +1319,17 @@ export const cases = [
 				/default-src 'none'/,
 			);
 			assert.equal(page.headers.get("access-control-allow-origin"), null);
-			assert.match(await page.text(), /Gemini 账号池/);
+			const pageHtml = await page.text();
+			assert.match(pageHtml, /Gemini 账号池/);
+			assert.match(pageHtml, /批量导入/);
+			assert.doesNotMatch(pageHtml, /private-cookie/);
+
+			const script = await request("/admin/assets/admin.js");
+			assert.equal(script.status, 200);
+			assert.match(await script.text(), /routing_strategy/);
 
 			const api = await request("/admin/api/accounts", {
-				headers: { authorization: auth },
+				headers: sessionHeaders,
 			});
 			assert.equal(api.status, 200);
 			const raw = await api.text();
@@ -1063,11 +1338,52 @@ export const cases = [
 			assert.equal(accounts.length, 2);
 			assert.equal(accounts[0].label, "Primary");
 			assert.equal(accounts[0].status, "healthy");
+			assert.equal(Object.hasOwn(accounts[0], "cookie"), false);
+			assert.equal(JSON.parse(raw).routing_strategy, "round_robin");
+			assert.equal(JSON.parse(raw).configuration_source, "environment");
+
+			const originalFetch = globalThis.fetch;
+			let probePage = '<html>"SNlM0e":"account-token"</html>';
+			globalThis.fetch = async (input, init) => {
+				assert.equal(String(input), "https://gemini.google.com/app");
+				assert.match(init.headers.Cookie, /private-cookie/);
+				return new Response(probePage, { status: 200 });
+			};
+			try {
+				const tested = await request("/admin/api/accounts/test", {
+					method: "POST",
+					headers: {
+						cookie: sessionCookie,
+						"content-type": "application/json",
+						origin: "https://worker.example",
+					},
+					body: JSON.stringify({ account_id: accounts[0].account_id }),
+				});
+				assert.equal(tested.status, 200);
+				const testedRaw = await tested.text();
+				assert.doesNotMatch(testedRaw, /private-cookie|account-token/);
+				assert.equal(JSON.parse(testedRaw).ok, true);
+				assert.equal(JSON.parse(testedRaw).issue, "");
+				probePage = "<html>signed-out</html>";
+				const rejectedProbe = await request("/admin/api/accounts/test", {
+					method: "POST",
+					headers: {
+						cookie: sessionCookie,
+						"content-type": "application/json",
+						origin: "https://worker.example",
+					},
+					body: JSON.stringify({ account_id: accounts[1].account_id }),
+				});
+				assert.equal(rejectedProbe.status, 200);
+				assert.equal((await rejectedProbe.json()).issue, "auth");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
 
 			const changed = await request("/admin/api/accounts", {
 				method: "PATCH",
 				headers: {
-					authorization: auth,
+					cookie: sessionCookie,
 					"content-type": "application/json",
 					origin: "https://worker.example",
 				},
@@ -1079,10 +1395,114 @@ export const cases = [
 			assert.equal(changed.status, 200);
 			assert.equal((await changed.json()).accounts[0].status, "disabled");
 
+			const importedSecret = "__Secure-1PSID=managed-private-cookie";
+			const previewed = await request("/admin/api/accounts/import/preview", {
+				method: "POST",
+				headers: {
+					cookie: sessionCookie,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({
+					mode: "append",
+					accounts: [
+						{
+							name: "Primary updated",
+							cookie: "__Secure-1PSID=private-cookie-one",
+						},
+						{ name: "Managed", cookie: importedSecret },
+						{ name: "Managed duplicate", cookie: importedSecret },
+					],
+				}),
+			});
+			assert.equal(previewed.status, 200);
+			const previewRaw = await previewed.text();
+			assert.doesNotMatch(previewRaw, /private-cookie/);
+			const preview = JSON.parse(previewRaw);
+			assert.equal(preview.total_input, 3);
+			assert.equal(preview.unique_accounts, 2);
+			assert.equal(preview.add_count, 1);
+			assert.equal(preview.update_count, 1);
+			assert.equal(preview.duplicate_count, 1);
+			assert.equal(preview.remove_count, 0);
+			const imported = await request("/admin/api/accounts/import", {
+				method: "POST",
+				headers: {
+					cookie: sessionCookie,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({
+					mode: "append",
+					accounts: [{ name: "Managed", cookie: importedSecret }],
+				}),
+			});
+			assert.equal(imported.status, 200);
+			const importedRaw = await imported.text();
+			assert.doesNotMatch(importedRaw, /managed-private-cookie/);
+			const importedSnapshot = JSON.parse(importedRaw);
+			assert.equal(importedSnapshot.configuration_source, "managed");
+			assert.equal(importedSnapshot.accounts.length, 3);
+			const managed = importedSnapshot.accounts.find(
+				(account) => account.label === "Managed",
+			);
+			assert.equal(Object.hasOwn(managed, "cookie"), false);
+
+			const replacementSecret =
+				"__Secure-1PSID=managed-private-cookie-replaced";
+			const edited = await request("/admin/api/accounts/edit", {
+				method: "POST",
+				headers: {
+					cookie: sessionCookie,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({
+					account_id: managed.account_id,
+					label: "Managed updated",
+					cookie: replacementSecret,
+					sapisid: "managed-private-sapisid-replaced",
+				}),
+			});
+			assert.equal(edited.status, 200);
+			const editedRaw = await edited.text();
+			assert.doesNotMatch(
+				editedRaw,
+				/managed-private-cookie|managed-private-sapisid/,
+			);
+			assert.match(editedRaw, /Managed updated/);
+
+			const strategy = await request("/admin/api/settings", {
+				method: "PATCH",
+				headers: {
+					cookie: sessionCookie,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({ routing_strategy: "priority" }),
+			});
+			assert.equal(strategy.status, 200);
+			assert.equal((await strategy.json()).routing_strategy, "priority");
+
+			const deleted = await request("/admin/api/accounts/bulk", {
+				method: "POST",
+				headers: {
+					cookie: sessionCookie,
+					"content-type": "application/json",
+					origin: "https://worker.example",
+				},
+				body: JSON.stringify({
+					account_ids: [managed.account_id],
+					action: "delete",
+				}),
+			});
+			assert.equal(deleted.status, 200);
+			assert.equal((await deleted.json()).accounts.length, 2);
+
 			const crossOrigin = await request("/admin/api/accounts", {
 				method: "PATCH",
 				headers: {
-					authorization: auth,
+					cookie: sessionCookie,
 					"content-type": "application/json",
 					origin: "https://attacker.example",
 				},
@@ -1092,6 +1512,16 @@ export const cases = [
 				}),
 			});
 			assert.equal(crossOrigin.status, 403);
+
+			const loggedOut = await request("/admin/logout", {
+				method: "POST",
+				headers: {
+					cookie: sessionCookie,
+					origin: "https://worker.example",
+				},
+			});
+			assert.equal(loggedOut.status, 303);
+			assert.match(loggedOut.headers.get("set-cookie"), /Max-Age=0/);
 		},
 	],
 	[

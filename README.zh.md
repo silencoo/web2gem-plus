@@ -287,9 +287,10 @@ docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 | 变量                            | 默认值                      | 说明                                                                                                                                                                               |
 | ------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `API_KEYS`                      | empty                       | 逗号分隔或 JSON 数组形式的 API keys。为空时关闭认证；空成员、非字符串成员和重复项会被拒绝。                                                                                                                              |
-| `ADMIN_PASSWORD`                | empty                       | `/admin` 与 `/admin/api/accounts` 的访问密码。用户名固定为 `admin`；留空时管理路由返回 HTTP 404。请作为 secret 配置。 |
+| `ADMIN_USERNAME`                | `admin`                     | `/admin/login` 的用户名。登录页不会预填或返回该值；共享部署应修改默认值并作为 secret 配置。 |
+| `ADMIN_PASSWORD`                | empty                       | 专用 `/admin/login` 页面的密码。登录成功后创建一个带签名、HttpOnly、SameSite=Strict、有效期 12 小时的会话；留空时所有管理路由返回 HTTP 404。请作为 secret 配置。 |
 | `GEMINI_COOKIE`                 | empty                       | 原始 Gemini cookie 字符串；或包含 `cookie` 和可选 `sapisid` 的 JSON；或包含 `secure_1psid`、`secure_1psidts` 和可选 `sapisid` 的 JSON。真实 Pro 路由、大上下文文本附件和已登录 Gemini Web 行为需要它。 |
-| `GEMINI_COOKIES`                | empty                       | Cookie 字符串或 Cookie 对象组成的 JSON 数组。它优先于 `GEMINI_COOKIE` 并启用 round-robin 账号选择；请作为 secret 配置。 |
+| `GEMINI_COOKIES`                | empty                       | Cookie 字符串或 Cookie 对象组成的 JSON 数组。它优先于 `GEMINI_COOKIE` 并用于初始化账号池；之后可在管理后台把账号列表和路由策略持久化到 Durable Object。请作为 secret 配置。 |
 | `SAPISID`                       | empty                       | 可选 SAPISID 覆盖值。为空时会尽量从 `GEMINI_COOKIE` 提取。                                                                                                                         |
 | `GEMINI_BL`                     | bundled value               | 上游请求使用的 Gemini Web build label。如果 Gemini Web 变化导致上游响应为空，需要更新它。                                                                                          |
 | `GEMINI_ORIGIN`                 | `https://gemini.google.com` | 上游源站。可指向你自己的转发服务或代理地址，并保留预期请求语义。                                                                                                                   |
@@ -310,19 +311,34 @@ docker run --rm -p 52389:52389 --env-file .env web2gem-plus:<tag>
 使用 Wrangler CLI 管理 Worker 时，可通过以下命令设置可选 secrets：
 
 - 共享部署时设置 `API_KEYS`。为空时会关闭认证。
-- 设置 `ADMIN_PASSWORD` 以启用账号池状态页和管理 API。
+- 设置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`，以使用私有凭据启用账号池状态页和管理 API。
 - 需要 Pro 路由、生图/图片编辑、大上下文文本附件或其他已登录 Gemini Web 行为时设置 `GEMINI_COOKIE`。
 - 多个账号共同承担请求时，改为设置 JSON 数组形式的 `GEMINI_COOKIES`。
 
 ```sh
 wrangler secret put API_KEYS
+wrangler secret put ADMIN_USERNAME
 wrangler secret put ADMIN_PASSWORD
 wrangler secret put GEMINI_COOKIE
 # 或者：
 wrangler secret put GEMINI_COOKIES
 ```
 
-设置 `ADMIN_PASSWORD` 后，打开 `/admin`，通过 HTTP Basic Auth 使用用户名 `admin` 登录。页面只展示账号名称、脱敏标识、健康状态、计数和时间，不返回 Cookie 或 SAPISID。`GET /admin/api/accounts` 返回相同的脱敏数据；`PATCH /admin/api/accounts` 接受 `{ "account_id": "...", "action": "enable|disable|reset" }`。
+设置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 后，打开 `/admin`，通过专用登录页面进入后台。页面不会预填或泄露任一凭据，用户名或密码错误时始终返回相同的通用提示。浏览器会收到一个带签名、HttpOnly、SameSite=Strict、有效期 12 小时的会话 Cookie；修改任一凭据都会让已有会话立即失效。所有修改类管理请求还会校验为当前部署的同源请求。
+
+登录失败会按 Cloudflare 客户端 IP 的单向哈希记录到 Durable Object。连续第 5 次失败开始封禁 30 秒，后续失败让等待时间翻倍，最高 15 分钟；登录成功会清除该客户端的失败状态。没有 Durable Object 绑定时使用进程内回退状态。
+
+账号页面支持 JSON 追加/替换导入、只写式凭据替换、修改名称、调整顺序，以及批量启用、停用、重置和删除。导入必须先经过预检，确认写入前会展示输入、新增、更新、删除、重复和格式错误数量。Cookie 与 SAPISID 只允许写入：页面、预检、账号列表 API、修改响应以及生成的 HTML/JavaScript 都不会返回它们。第一次修改账号列表时，系统会把当前生效凭据复制成由 Durable Object 托管的快照，之后 Secret 的变化不会悄悄覆盖后台托管账号；点击「恢复 Secret 配置」可以删除该托管列表，重新以 `GEMINI_COOKIE` / `GEMINI_COOKIES` 为准。
+
+每个账号还提供「测试」操作。它使用该账号请求 Gemini 应用页并检查认证页面令牌，只返回可用性、延迟、标准化错误类型和 HTTP 状态；不会发送模型提示词，也不会回传页面内容或凭据。
+
+路由策略可直接在后台切换，无需重新部署：
+
+- **轮询**：按顺序将请求分配给可用账号。
+- **固定优先级**：始终选择列表中第一个可用账号，因此列表顺序代表优先级。
+- **最少请求**：选择累计请求次数最少的可用账号。
+
+所选策略和后台托管账号列表会持久化到 `GEMINI_SESSION_POOL`。如果没有绑定 Durable Object，这些设置仅在当前进程或 isolate 生命周期内有效。
 
 当配置的 Cookie 包含 `__Secure-1PSID` 时，Worker 会在 Cookie 过期或认证上游请求失败时懒调用 Google 的 `RotateCookies` 端点。刷新后的凭据通过带版本比较的更新写入 `GEMINI_SESSION_POOL` Durable Object，因此新 isolate 会读取最新状态，不再回退到旧 secret。修改 secret 会替换对应账号的存储状态并重新启用它。
 

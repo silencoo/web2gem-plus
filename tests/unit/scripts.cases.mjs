@@ -8,6 +8,7 @@ import { mod } from "./helpers.js";
 
 const DEPLOY_SECRET_TEMPLATE_KEYS = [
 	"ADMIN_PASSWORD",
+	"ADMIN_USERNAME",
 	"API_KEYS",
 	"GEMINI_COOKIE",
 	"GEMINI_COOKIES",

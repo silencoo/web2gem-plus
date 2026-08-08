@@ -5,4 +5,5 @@ SAPISID=
 
 # Optional public API auth. Leave empty to disable authentication.
 API_KEYS=
+ADMIN_USERNAME=admin
 ADMIN_PASSWORD=
