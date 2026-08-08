@@ -43,6 +43,46 @@ function wrbLine(texts) {
 	return JSON.stringify([["wrb.fr", null, JSON.stringify(inner)]]);
 }
 
+function createTestGeminiSessionPool(seeds) {
+	let stored;
+	const storage = {
+		transaction: async (callback) => callback(storage),
+		get: async () => stored,
+		put: async (_key, value) => {
+			stored = structuredClone(value);
+		},
+	};
+	const durablePool = new mod.GeminiSessionPool({ storage });
+	const call = async (path, body) => {
+		const response = await durablePool.fetch(
+			new Request(`https://pool.test${path}`, {
+				method: "POST",
+				body: JSON.stringify(body),
+			}),
+		);
+		return response.json();
+	};
+	const port = {
+		acquire: (exclude = []) => call("/acquire", { seeds, exclude }),
+		beginRotation: (lease) => call("/begin-rotation", { lease }),
+		commitRotation: (rotation, cookie, sapisid) =>
+			call("/commit-rotation", { rotation, cookie, sapisid }),
+		abortRotation: async (rotation) => {
+			await call("/abort-rotation", { rotation });
+		},
+		failRotation: async (rotation, issue = "auth") => {
+			await call("/fail-rotation", { rotation, issue });
+		},
+		markFailure: async (lease, issue) => {
+			await call("/failure", { lease, issue });
+		},
+		markSuccess: async (lease) => {
+			await call("/success", { lease });
+		},
+	};
+	return { call, port, stored: () => structuredClone(stored) };
+}
+
 function richWrbLine(candidate) {
 	const inner = [null, null, null, null, [candidate], "x".repeat(160)];
 	return JSON.stringify([["wrb.fr", null, JSON.stringify(inner)]]);
@@ -1793,6 +1833,37 @@ export const cases = [
 		},
 	],
 	[
+		"applies Set-Cookie deletion domain and path rules for Gemini",
+		async () => {
+			const scope = {
+				responseUrl: "https://accounts.google.com/RotateCookies",
+				targetUrl: "https://gemini.google.com/app",
+				nowMs: Date.parse("2026-08-08T00:00:00Z"),
+			};
+			const merged = mod.mergeSetCookieHeaders(
+				"SID=ok; __Secure-1PSIDTS=old; SAPISID=sapi",
+				[
+					"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+					"NID=host-only; Path=/; Secure",
+					"SAPISID=wrong-path; Domain=.google.com; Path=/accounts; Secure",
+					"SID=wrong-domain; Domain=.example.com; Path=/; Secure",
+				],
+				scope,
+			);
+			assert.equal(merged, "SID=ok; __Secure-1PSIDTS=new; SAPISID=sapi");
+
+			const deleted = mod.mergeSetCookieHeaders(
+				merged,
+				[
+					"__Secure-1PSIDTS=gone; Domain=.google.com; Path=/; Max-Age=0; Secure",
+					"SID=gone; Domain=.google.com; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure",
+				],
+				scope,
+			);
+			assert.equal(deleted, "SAPISID=sapi");
+		},
+	],
+	[
 		"derives active Gemini cookie config without mutating input",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();
@@ -1856,7 +1927,10 @@ export const cases = [
 					assert.match(init.headers["User-Agent"], /Mozilla\/5\.0/);
 					return new Response("", {
 						status: 200,
-						headers: { "set-cookie": "__Secure-1PSIDTS=new; Path=/; Secure" },
+						headers: {
+							"set-cookie":
+								"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+						},
 					});
 				},
 				async () => {
@@ -1867,6 +1941,10 @@ export const cases = [
 						"__Secure-1PSID=psid; __Secure-1PSIDTS=new; SAPISID=sapi",
 					);
 					assert.equal(rotated.sapisid, "sapi");
+					mod.configWithActiveGeminiCookie(rotated);
+					const nextRequest = mod.configWithActiveGeminiCookie(cfg);
+					assert.match(nextRequest.cookie, /__Secure-1PSIDTS=new/);
+					assert.doesNotMatch(nextRequest.cookie, /__Secure-1PSIDTS=old/);
 				},
 			);
 		},
@@ -1888,7 +1966,7 @@ export const cases = [
 						status: 200,
 						headers: {
 							"set-cookie":
-								"__Secure-1PSIDTS=new; Path=/; Secure, SAPISID=new-sapi; Path=/; Secure",
+								"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure, SAPISID=new-sapi; Domain=.google.com; Path=/; Secure",
 						},
 					}),
 				async () => {
@@ -1941,6 +2019,40 @@ export const cases = [
 		},
 	],
 	[
+		"does not accept unrelated or host-only Set-Cookie updates as rotation",
+		async () => {
+			for (const setCookie of [
+				"NID=unrelated; Domain=.google.com; Path=/; Secure",
+				"__Secure-1PSIDTS=new; Path=/; Secure",
+			]) {
+				mod.resetActiveGeminiCookieForTest();
+				const cfg = {
+					cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old",
+					sapisid: "",
+					request_timeout_sec: 180,
+					upstream_socket: false,
+					log_requests: false,
+				};
+				await withFetch(
+					async () =>
+						new Response("", {
+							status: 200,
+							headers: { "set-cookie": setCookie },
+						}),
+					async () => {
+						const result = await mod.rotateGeminiCookieForRetryWithReason(cfg);
+						assert.equal(result.config, null);
+						assert.equal(result.reason, "rotation_no_update");
+						assert.match(
+							mod.configWithActiveGeminiCookie(cfg).cookie,
+							/__Secure-1PSIDTS=old/,
+						);
+					},
+				);
+			}
+		},
+	],
+	[
 		"coalesces concurrent cookie rotation requests",
 		async () => {
 			mod.resetActiveGeminiCookieForTest();
@@ -1962,7 +2074,10 @@ export const cases = [
 					await gate;
 					return new Response("", {
 						status: 200,
-						headers: { "set-cookie": "__Secure-1PSIDTS=new; Path=/; Secure" },
+						headers: {
+							"set-cookie":
+								"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+						},
 					});
 				},
 				async () => {
@@ -1979,6 +2094,209 @@ export const cases = [
 						results[1].cookie,
 						"__Secure-1PSID=psid; __Secure-1PSIDTS=new",
 					);
+				},
+			);
+		},
+	],
+	[
+		"persists pooled rotation before returning the retry config",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			const seeds = [
+				{
+					label: "one",
+					cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old",
+					sapisid: "",
+				},
+			];
+			const pool = createTestGeminiSessionPool(seeds);
+			const lease = await pool.port.acquire();
+			const cfg = {
+				cookie: lease.cookie,
+				sapisid: lease.sapisid,
+				request_timeout_sec: 180,
+				upstream_socket: false,
+				log_requests: false,
+				gemini_session: lease,
+				gemini_session_pool: pool.port,
+			};
+
+			await withFetch(
+				async () =>
+					new Response("", {
+						status: 200,
+						headers: {
+							"set-cookie":
+								"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+						},
+					}),
+				async () => {
+					const result = await mod.rotateGeminiCookieForRetryWithReason(cfg);
+					assert.equal(result.reason, "rotation_updated");
+					assert.match(result.config.cookie, /__Secure-1PSIDTS=new/);
+					assert.equal(result.config.gemini_rotation, undefined);
+					assert.equal(
+						result.config.gemini_session.version > lease.version,
+						true,
+					);
+
+					const concurrent = await pool.port.acquire();
+					assert.match(concurrent.cookie, /__Secure-1PSIDTS=new/);
+					assert.equal(
+						pool.stored().accounts[lease.account_id].rotation_token,
+						"",
+					);
+				},
+			);
+		},
+	],
+	[
+		"retries pooled rotation persistence with waitUntil after transient failures",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			const seeds = [
+				{
+					label: "one",
+					cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old",
+					sapisid: "",
+				},
+			];
+			const pool = createTestGeminiSessionPool(seeds);
+			const lease = await pool.port.acquire();
+			const durableCommit = pool.port.commitRotation;
+			let commitCalls = 0;
+			const flakyPort = {
+				...pool.port,
+				async commitRotation(...args) {
+					commitCalls += 1;
+					if (commitCalls <= 2) throw new Error("temporary pool failure");
+					return durableCommit(...args);
+				},
+			};
+			const pending = [];
+			const cfg = {
+				cookie: lease.cookie,
+				sapisid: lease.sapisid,
+				request_timeout_sec: 180,
+				upstream_socket: false,
+				log_requests: false,
+				gemini_session: lease,
+				gemini_session_pool: flakyPort,
+				execution_ctx: {
+					waitUntil(promise) {
+						pending.push(promise);
+					},
+				},
+			};
+
+			await withFetch(
+				async () =>
+					new Response("", {
+						status: 200,
+						headers: {
+							"set-cookie":
+								"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+						},
+					}),
+				async () => {
+					const result = await mod.rotateGeminiCookieForRetryWithReason(cfg);
+					assert.match(result.config.cookie, /__Secure-1PSIDTS=new/);
+					assert.equal(result.config.gemini_rotation === undefined, false);
+					assert.equal(pending.length, 1);
+					await Promise.all(pending);
+					assert.equal(commitCalls, 3);
+					const available = await pool.port.acquire();
+					assert.match(available.cookie, /__Secure-1PSIDTS=new/);
+				},
+			);
+		},
+	],
+	[
+		"persists target-cookie deletion and cools the pooled account",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			const seeds = [
+				{
+					label: "one",
+					cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old",
+					sapisid: "",
+				},
+			];
+			const pool = createTestGeminiSessionPool(seeds);
+			const lease = await pool.port.acquire();
+			const cfg = {
+				cookie: lease.cookie,
+				sapisid: lease.sapisid,
+				request_timeout_sec: 180,
+				upstream_socket: false,
+				log_requests: false,
+				gemini_session: lease,
+				gemini_session_pool: pool.port,
+			};
+
+			await withFetch(
+				async () =>
+					new Response("", {
+						status: 200,
+						headers: {
+							"set-cookie":
+								"__Secure-1PSID=; Domain=.google.com; Path=/; Max-Age=0; Secure, __Secure-1PSIDTS=; Domain=.google.com; Path=/; Max-Age=0; Secure",
+						},
+					}),
+				async () => {
+					const result = await mod.rotateGeminiCookieForRetryWithReason(cfg);
+					assert.equal(result.config, null);
+					assert.equal(result.reason, "rotation_no_update");
+					assert.equal(pool.stored().accounts[lease.account_id].cookie, "");
+					const accounts = await pool.call("/accounts", { seeds });
+					assert.equal(accounts[0].status, "cooling");
+					assert.equal(accounts[0].issue, "auth");
+					assert.equal(await pool.port.acquire(), null);
+				},
+			);
+		},
+	],
+	[
+		"cools a pooled account when rotation returns no auth update",
+		async () => {
+			mod.resetActiveGeminiCookieForTest();
+			const seeds = [
+				{
+					label: "one",
+					cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old",
+					sapisid: "",
+				},
+			];
+			const pool = createTestGeminiSessionPool(seeds);
+			const lease = await pool.port.acquire();
+			const cfg = {
+				cookie: lease.cookie,
+				sapisid: lease.sapisid,
+				request_timeout_sec: 180,
+				upstream_socket: false,
+				log_requests: false,
+				gemini_session: lease,
+				gemini_session_pool: pool.port,
+			};
+
+			await withFetch(
+				async () =>
+					new Response("", {
+						status: 200,
+						headers: {
+							"set-cookie": "NID=unrelated; Domain=.google.com; Path=/; Secure",
+						},
+					}),
+				async () => {
+					const result = await mod.rotateGeminiCookieForRetryWithReason(cfg);
+					assert.equal(result.config, null);
+					assert.equal(result.reason, "rotation_no_update");
+					const stored = pool.stored().accounts[lease.account_id];
+					assert.match(stored.cookie, /__Secure-1PSIDTS=old/);
+					assert.equal(stored.rotation_token, "");
+					const accounts = await pool.call("/accounts", { seeds });
+					assert.equal(accounts[0].status, "cooling");
+					assert.equal(accounts[0].issue, "auth");
 				},
 			);
 		},
@@ -2212,7 +2530,10 @@ export const cases = [
 					if (href === "https://accounts.google.com/RotateCookies") {
 						return new Response("", {
 							status: 200,
-							headers: { "set-cookie": "__Secure-1PSIDTS=new; Path=/; Secure" },
+							headers: {
+								"set-cookie":
+									"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+							},
 						});
 					}
 					throw new Error(`unexpected fetch ${href}`);
@@ -2539,7 +2860,10 @@ export const cases = [
 						assert.match(init.headers.Cookie, /__Secure-1PSIDTS=old/);
 						return new Response("", {
 							status: 200,
-							headers: { "set-cookie": "__Secure-1PSIDTS=new; Path=/; Secure" },
+							headers: {
+								"set-cookie":
+									"__Secure-1PSIDTS=new; Domain=.google.com; Path=/; Secure",
+							},
 						});
 					}
 					assert.match(href, /StreamGenerate/);

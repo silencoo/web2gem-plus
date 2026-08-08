@@ -11,6 +11,8 @@ export type ActiveCookieState = {
 	updatedAtMs: number;
 	lastRotateAtMs: number;
 	sourceKey: string;
+	sourceCookie: string;
+	sourceSapisid: string;
 };
 
 export type CookieRotationReason =
@@ -29,11 +31,28 @@ export type CookieRotationRetryResult = {
 	upstreamStatus?: number;
 };
 
+export type MergeSetCookieOptions = Readonly<{
+	responseUrl?: string;
+	targetUrl?: string;
+	nowMs?: number;
+}>;
+
+type CookieRotationAttempt = {
+	state: ActiveCookieState;
+	updated: boolean;
+	credentialInvalidated: boolean;
+	reason: CookieRotationReason;
+	upstreamStatus?: number;
+};
+
 export const COOKIE_ROTATE_MIN_INTERVAL_MS = 60 * 1000;
 export const COOKIE_ROTATE_STALE_MS = 10 * 60 * 1000;
 
+const GOOGLE_ROTATE_COOKIES_URL = "https://accounts.google.com/RotateCookies";
+const GEMINI_COOKIE_TARGET_URL = "https://gemini.google.com/app";
+
 let activeCookieState: ActiveCookieState | null = null;
-let rotatePromise: Promise<ActiveCookieState | null> | null = null;
+let rotatePromise: Promise<CookieRotationAttempt | null> | null = null;
 let lastRotationReason: CookieRotationReason = "missing_cookie";
 let lastRotationUpstreamStatus = 0;
 
@@ -92,18 +111,14 @@ export function setCookieHeaders(headers: Headers): string[] {
 export function mergeSetCookieHeaders(
 	cookieHeader: unknown,
 	setCookieValues: readonly string[],
+	options: MergeSetCookieOptions = {},
 ): string {
 	const cookies = parseCookieHeader(cookieHeader);
 	for (const setCookie of setCookieValues) {
-		const first =
-			String(setCookie || "")
-				.split(";")[0]
-				?.trim() || "";
-		const eq = first.indexOf("=");
-		if (eq <= 0) continue;
-		const name = first.slice(0, eq).trim();
-		const value = first.slice(eq + 1).trim();
-		if (name) cookies.set(name, value);
+		const mutation = parseSetCookieMutation(setCookie, options);
+		if (!mutation) continue;
+		if (mutation.remove) cookies.delete(mutation.name);
+		else cookies.set(mutation.name, mutation.value);
 	}
 	return serializeCookieMap(cookies);
 }
@@ -134,12 +149,12 @@ export async function configWithFreshGeminiCookie(
 	const state = ensureActiveCookieState(cfg);
 	if (!state) return cfg;
 	if (Date.now() - state.updatedAtMs > COOKIE_ROTATE_STALE_MS) {
-		const refreshed = await rotateGeminiCookie(cfg, { force: false });
-		if (refreshed) {
+		const attempt = await rotateGeminiCookie(cfg, { force: false });
+		if (attempt?.updated) {
 			const next = {
 				...cfg,
-				cookie: refreshed.cookie,
-				sapisid: refreshed.sapisid || cfg.sapisid,
+				cookie: attempt.state.cookie,
+				sapisid: attempt.state.sapisid || cfg.sapisid,
 			};
 			return next;
 		}
@@ -159,21 +174,28 @@ export async function rotateGeminiCookieForRetryWithReason(
 	if (cfg.gemini_session_pool && cfg.gemini_session) {
 		if (cfg.gemini_rotation) {
 			setRotationReason("rotation_rejected");
-			return rotationRetryResult(null);
+			return rotationRetryResult(null, "rotation_rejected");
 		}
-		const next = await rotatePooledGeminiCookie(cfg, true);
-		return rotationRetryResult(next);
+		return rotatePooledGeminiCookie(cfg);
 	}
 	const current = configWithActiveGeminiCookie(cfg);
-	const refreshed = await rotateGeminiCookie(current, { force: true });
-	if (!refreshed || refreshed.cookie === current.cookie) {
-		return rotationRetryResult(null);
+	const attempt = await rotateGeminiCookie(current, { force: true });
+	if (!attempt?.updated) {
+		return rotationRetryResult(
+			null,
+			attempt?.reason || lastRotationReason,
+			attempt?.upstreamStatus,
+		);
 	}
-	return rotationRetryResult({
-		...cfg,
-		cookie: refreshed.cookie,
-		sapisid: refreshed.sapisid || cfg.sapisid,
-	});
+	return rotationRetryResult(
+		{
+			...cfg,
+			cookie: attempt.state.cookie,
+			sapisid: attempt.state.sapisid || cfg.sapisid,
+		},
+		attempt.reason,
+		attempt.upstreamStatus,
+	);
 }
 
 export async function switchGeminiSessionForRetry(
@@ -185,8 +207,23 @@ export async function switchGeminiSessionForRetry(
 	const lease = cfg.gemini_session;
 	if (!pool || !lease) return null;
 	if (cfg.gemini_rotation) {
-		if (issue) await pool.failRotation(cfg.gemini_rotation, issue);
-		else await pool.abortRotation(cfg.gemini_rotation);
+		try {
+			const committed = await commitRotationCandidate(
+				pool,
+				cfg.gemini_rotation,
+				cfg.cookie,
+				cfg.sapisid,
+			);
+			if (committed && issue) await pool.markFailure(committed, issue);
+		} catch (error) {
+			// RotateCookies is an external, irreversible mutation. Keep the fence in
+			// place when persistence is unavailable instead of restoring a cookie
+			// that Google may already have invalidated.
+			log(
+				cfg,
+				`gemini session rotated cookie persistence failed ${errorLogSummary(error)}`,
+			);
+		}
 	} else if (issue) await pool.markFailure(lease, issue);
 	const excluded = new Set(excludeAccountIds);
 	excluded.add(lease.account_id);
@@ -208,12 +245,18 @@ export async function markGeminiSessionSuccess(
 	try {
 		let lease = cfg.gemini_session;
 		if (cfg.gemini_rotation) {
-			const committed = await cfg.gemini_session_pool.commitRotation(
+			const committed = await commitRotationCandidate(
+				cfg.gemini_session_pool,
 				cfg.gemini_rotation,
 				cfg.cookie,
 				cfg.sapisid,
 			);
-			if (committed) lease = committed;
+			if (!committed) return;
+			if (!leaseHasRefreshedAuth(committed, lease.cookie)) {
+				await cfg.gemini_session_pool.markFailure(committed, "auth");
+				return;
+			}
+			lease = committed;
 		}
 		await cfg.gemini_session_pool.markSuccess(lease);
 	} catch (error) {
@@ -226,31 +269,50 @@ export async function abortGeminiSessionRotation(
 ): Promise<void> {
 	if (!cfg.gemini_session_pool || !cfg.gemini_rotation) return;
 	try {
-		await cfg.gemini_session_pool.abortRotation(cfg.gemini_rotation);
+		// A successful RotateCookies response has already mutated Google's state.
+		// Disposal must persist that state; aborting would resurrect the old value.
+		const committed = await commitRotationCandidate(
+			cfg.gemini_session_pool,
+			cfg.gemini_rotation,
+			cfg.cookie,
+			cfg.sapisid,
+		);
+		if (
+			committed &&
+			cfg.gemini_session &&
+			!leaseHasRefreshedAuth(committed, cfg.gemini_session.cookie)
+		)
+			await cfg.gemini_session_pool.markFailure(committed, "auth");
 	} catch (error) {
-		log(cfg, `gemini session rotation abort failed ${errorLogSummary(error)}`);
+		log(
+			cfg,
+			`gemini session rotated cookie persistence failed ${errorLogSummary(error)}`,
+		);
 	}
 }
 
 async function rotatePooledGeminiCookie(
 	cfg: RuntimeConfig,
-	_force: boolean,
-): Promise<RuntimeConfig | null> {
+): Promise<CookieRotationRetryResult> {
 	const pool = cfg.gemini_session_pool;
 	const originalLease = cfg.gemini_session;
-	if (!pool || !originalLease) return null;
+	if (!pool || !originalLease)
+		return rotationRetryResult(null, "missing_cookie");
 	const start = await pool.beginRotation(originalLease);
 	if (start.status === "updated") {
 		setRotationReason("rotation_updated");
-		return configWithLease(cfg, start.lease);
+		return rotationRetryResult(
+			configWithLease(cfg, start.lease),
+			"rotation_updated",
+		);
 	}
 	if (start.status === "busy") {
 		setRotationReason("recent_rotation");
-		return null;
+		return rotationRetryResult(null, "recent_rotation");
 	}
 	if (start.status !== "acquired") {
 		setRotationReason("rotation_failed");
-		return null;
+		return rotationRetryResult(null, "rotation_failed");
 	}
 	const fencedCfg = configWithLease(cfg, start.lease);
 	const state = stateFromCookie(
@@ -258,28 +320,163 @@ async function rotatePooledGeminiCookie(
 		cookieSourceKey(fencedCfg),
 		Date.now(),
 		fencedCfg.sapisid,
+		fencedCfg.cookie,
+		fencedCfg.sapisid,
 	);
 	if (!state) {
-		await pool.abortRotation(start.rotation);
+		await pool.failRotation(start.rotation, "auth");
 		setRotationReason("missing_cookie");
-		return null;
+		return rotationRetryResult(null, "missing_cookie");
 	}
-	const refreshed = await rotateGeminiCookieOnce(fencedCfg, state, false);
-	if (!refreshed || refreshed.cookie === state.cookie) {
-		if (
-			lastRotationReason === "rotation_rejected" ||
-			lastRotationReason === "missing_secure_1psid"
-		)
-			await pool.failRotation(start.rotation);
-		else await pool.abortRotation(start.rotation);
-		return null;
+	if (!state.secure1psid) {
+		await pool.failRotation(start.rotation, "auth");
+		setRotationReason("missing_secure_1psid");
+		return rotationRetryResult(null, "missing_secure_1psid");
 	}
-	return {
+	const attempt = await rotateGeminiCookieOnce(fencedCfg, state, false);
+	if (!attempt.updated) {
+		if (attempt.credentialInvalidated) {
+			try {
+				const committed = await commitRotationCandidate(
+					pool,
+					start.rotation,
+					attempt.state.cookie,
+					attempt.state.sapisid,
+				);
+				if (committed) await pool.markFailure(committed, "auth");
+			} catch (error) {
+				log(
+					cfg,
+					`gemini session invalidated cookie persistence failed ${errorLogSummary(error)}`,
+				);
+				scheduleRotationPersistence(
+					cfg,
+					pool,
+					start.rotation,
+					attempt.state.cookie,
+					attempt.state.sapisid,
+					state.cookie,
+					"auth",
+				);
+			}
+		} else {
+			// The triggering Gemini request already proved this credential invalid.
+			// Record that failure while releasing the rotation fence.
+			await pool.failRotation(start.rotation, "auth");
+		}
+		return rotationRetryResult(null, attempt.reason, attempt.upstreamStatus);
+	}
+
+	const candidateCfg: RuntimeConfig = {
 		...fencedCfg,
-		cookie: refreshed.cookie,
-		sapisid: refreshed.sapisid || fencedCfg.sapisid,
+		cookie: attempt.state.cookie,
+		sapisid: attempt.state.sapisid || fencedCfg.sapisid,
 		gemini_rotation: start.rotation,
 	};
+	try {
+		const committed = await commitRotationCandidate(
+			pool,
+			start.rotation,
+			candidateCfg.cookie,
+			candidateCfg.sapisid,
+		);
+		if (committed) {
+			if (!leaseHasRefreshedAuth(committed, state.cookie)) {
+				log(cfg, "gemini session pool did not persist the rotated cookie");
+				await pool.markFailure(committed, "auth");
+				setRotationReason("rotation_failed");
+				return rotationRetryResult(null, "rotation_failed");
+			}
+			return rotationRetryResult(
+				configWithLease(cfg, committed),
+				attempt.reason,
+				attempt.upstreamStatus,
+			);
+		}
+	} catch (error) {
+		log(
+			cfg,
+			`gemini session rotated cookie persistence failed ${errorLogSummary(error)}`,
+		);
+	}
+	scheduleRotationPersistence(
+		cfg,
+		pool,
+		start.rotation,
+		candidateCfg.cookie,
+		candidateCfg.sapisid,
+		state.cookie,
+	);
+	// Preserve the candidate and its fencing token as a last-resort recovery path.
+	// Success, failure, and provider disposal all retry the idempotent commit.
+	return rotationRetryResult(
+		candidateCfg,
+		attempt.reason,
+		attempt.upstreamStatus,
+	);
+}
+
+async function commitRotationCandidate(
+	pool: NonNullable<RuntimeConfig["gemini_session_pool"]>,
+	rotation: NonNullable<RuntimeConfig["gemini_rotation"]>,
+	cookie: string,
+	sapisid: string,
+): Promise<NonNullable<RuntimeConfig["gemini_session"]> | null> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			return await pool.commitRotation(rotation, cookie, sapisid);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError;
+}
+
+function leaseHasRefreshedAuth(
+	lease: NonNullable<RuntimeConfig["gemini_session"]>,
+	previousCookie: string,
+): boolean {
+	const secure1psid = extractCookieValue(lease.cookie, "__Secure-1PSID");
+	const secure1psidts = extractCookieValue(lease.cookie, "__Secure-1PSIDTS");
+	const previous1psidts = extractCookieValue(
+		previousCookie,
+		"__Secure-1PSIDTS",
+	);
+	return !!secure1psid && !!secure1psidts && secure1psidts !== previous1psidts;
+}
+
+function scheduleRotationPersistence(
+	cfg: RuntimeConfig,
+	pool: NonNullable<RuntimeConfig["gemini_session_pool"]>,
+	rotation: NonNullable<RuntimeConfig["gemini_rotation"]>,
+	cookie: string,
+	sapisid: string,
+	previousCookie: string,
+	issue?: GeminiSessionFailureIssue,
+): void {
+	if (!cfg.execution_ctx) return;
+	cfg.execution_ctx.waitUntil(
+		(async () => {
+			try {
+				const committed = await commitRotationCandidate(
+					pool,
+					rotation,
+					cookie,
+					sapisid,
+				);
+				if (!committed) return;
+				if (issue) await pool.markFailure(committed, issue);
+				else if (!leaseHasRefreshedAuth(committed, previousCookie))
+					await pool.markFailure(committed, "auth");
+			} catch (error) {
+				log(
+					cfg,
+					`gemini session background cookie persistence failed ${errorLogSummary(error)}`,
+				);
+			}
+		})(),
+	);
 }
 
 function configWithLease(
@@ -303,16 +500,15 @@ function withoutRotation(cfg: RuntimeConfig): RuntimeConfig {
 async function rotateGeminiCookie(
 	cfg: RuntimeConfig,
 	options: { force: boolean },
-): Promise<ActiveCookieState | null> {
+): Promise<CookieRotationAttempt | null> {
 	const state = ensureActiveCookieState(cfg);
 	if (!state) {
 		setRotationReason("missing_cookie");
 		return null;
 	}
 	if (!state.secure1psid) {
-		setRotationReason("missing_secure_1psid");
 		log(cfg, "gemini cookie rotation skipped reason=missing_secure_1psid");
-		return state;
+		return cookieRotationAttempt(state, "missing_secure_1psid");
 	}
 	if (rotatePromise) return rotatePromise;
 
@@ -320,15 +516,15 @@ async function rotateGeminiCookie(
 	if (
 		!options.force &&
 		now - state.lastRotateAtMs < COOKIE_ROTATE_MIN_INTERVAL_MS
-	)
-		return state;
+	) {
+		return cookieRotationAttempt(state, "recent_rotation");
+	}
 	if (
 		options.force &&
 		now - state.lastRotateAtMs < COOKIE_ROTATE_MIN_INTERVAL_MS
 	) {
-		setRotationReason("recent_rotation");
 		log(cfg, "gemini cookie rotation skipped reason=recent_rotation");
-		return state;
+		return cookieRotationAttempt(state, "recent_rotation");
 	}
 
 	state.lastRotateAtMs = now;
@@ -342,9 +538,9 @@ async function rotateGeminiCookieOnce(
 	cfg: RuntimeConfig,
 	state: ActiveCookieState,
 	updateGlobal = true,
-): Promise<ActiveCookieState | null> {
+): Promise<CookieRotationAttempt> {
 	try {
-		const resp = await httpFetch("https://accounts.google.com/RotateCookies", {
+		const resp = await httpFetch(GOOGLE_ROTATE_COOKIES_URL, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -364,39 +560,79 @@ async function rotateGeminiCookieOnce(
 			cfg,
 		});
 		if (resp.status === 401 || resp.status === 403) {
-			setRotationReason("rotation_rejected", resp.status);
 			log(cfg, `gemini cookie rotation rejected upstreamStatus=${resp.status}`);
-			return state;
+			return cookieRotationAttempt(
+				state,
+				"rotation_rejected",
+				false,
+				false,
+				resp.status,
+			);
 		}
 		if (!resp.ok) {
-			setRotationReason("rotation_failed", resp.status);
 			log(cfg, `gemini cookie rotation failed upstreamStatus=${resp.status}`);
-			return state;
+			return cookieRotationAttempt(
+				state,
+				"rotation_failed",
+				false,
+				false,
+				resp.status,
+			);
 		}
 
+		const setCookies = setCookieHeaders(resp.headers);
+		const mergeOptions = {
+			responseUrl: GOOGLE_ROTATE_COOKIES_URL,
+			targetUrl: GEMINI_COOKIE_TARGET_URL,
+		};
 		const mergedCookie = mergeSetCookieHeaders(
 			state.cookie,
-			setCookieHeaders(resp.headers),
+			setCookies,
+			mergeOptions,
+		);
+		const sapisidMutated = setCookies.some(
+			(value) =>
+				parseSetCookieMutation(value, mergeOptions)?.name === "SAPISID",
 		);
 		const next = stateFromCookie(
 			mergedCookie,
 			state.sourceKey,
 			state.lastRotateAtMs,
-			cfg.sapisid,
+			sapisidMutated ? "" : state.sapisid || cfg.sapisid,
+			state.sourceCookie,
+			state.sourceSapisid,
+			true,
 		);
-		if (!next || next.cookie === state.cookie) {
-			setRotationReason("rotation_no_update");
-			log(cfg, "gemini cookie rotation completed without cookie update");
-			return state;
+		if (!next) return cookieRotationAttempt(state, "rotation_no_update");
+		const targetUpdated =
+			!!next.secure1psid &&
+			!!next.secure1psidts &&
+			next.secure1psidts !== state.secure1psidts;
+		const credentialInvalidated =
+			next.cookie !== state.cookie &&
+			((!!state.secure1psid && !next.secure1psid) ||
+				(!!state.secure1psidts && !next.secure1psidts));
+		if (!targetUpdated) {
+			if (credentialInvalidated && updateGlobal) activeCookieState = next;
+			log(
+				cfg,
+				credentialInvalidated
+					? "gemini cookie rotation invalidated an authentication cookie"
+					: "gemini cookie rotation completed without target cookie update",
+			);
+			return cookieRotationAttempt(
+				credentialInvalidated ? next : state,
+				"rotation_no_update",
+				false,
+				credentialInvalidated,
+			);
 		}
 		if (updateGlobal) activeCookieState = next;
-		setRotationReason("rotation_updated");
 		log(cfg, "gemini cookie rotation updated active cookie");
-		return next;
+		return cookieRotationAttempt(next, "rotation_updated", true);
 	} catch (e) {
-		setRotationReason("rotation_error");
 		log(cfg, `gemini cookie rotation error ${errorLogSummary(e)}`);
-		return state;
+		return cookieRotationAttempt(state, "rotation_error");
 	}
 }
 
@@ -405,10 +641,29 @@ function ensureActiveCookieState(cfg: RuntimeConfig): ActiveCookieState | null {
 		activeCookieState = null;
 		return null;
 	}
+	const normalizedCookie = serializeCookieMap(parseCookieHeader(cfg.cookie));
+	if (!normalizedCookie) {
+		activeCookieState = null;
+		return null;
+	}
 	const sourceKey = cookieSourceKey(cfg);
-	if (activeCookieState && activeCookieState.sourceKey === sourceKey)
-		return activeCookieState;
-	activeCookieState = stateFromCookie(cfg.cookie, sourceKey, 0, cfg.sapisid);
+	const sourceSapisid = String(cfg.sapisid || "");
+	if (activeCookieState && activeCookieState.sourceKey === sourceKey) {
+		if (normalizedCookie === activeCookieState.cookie) return activeCookieState;
+		if (
+			normalizedCookie === activeCookieState.sourceCookie &&
+			sourceSapisid === activeCookieState.sourceSapisid
+		)
+			return activeCookieState;
+	}
+	activeCookieState = stateFromCookie(
+		normalizedCookie,
+		sourceKey,
+		0,
+		cfg.sapisid,
+		normalizedCookie,
+		sourceSapisid,
+	);
 	return activeCookieState;
 }
 
@@ -417,10 +672,13 @@ function stateFromCookie(
 	sourceKey: string,
 	lastRotateAtMs: number,
 	sapisidOverride?: unknown,
+	sourceCookie?: string,
+	sourceSapisid?: string,
+	allowEmpty = false,
 ): ActiveCookieState | null {
 	const cookies = parseCookieHeader(cookie);
 	const normalizedCookie = serializeCookieMap(cookies);
-	if (!normalizedCookie) return null;
+	if (!normalizedCookie && !allowEmpty) return null;
 	// The cookie jar is authoritative after RotateCookies. An explicit SAPISID is
 	// only a fallback for compact configurations that omit it from the header.
 	const sapisid = String(cookies.get("SAPISID") || sapisidOverride || "");
@@ -432,22 +690,145 @@ function stateFromCookie(
 		updatedAtMs: Date.now(),
 		lastRotateAtMs,
 		sourceKey,
+		sourceCookie:
+			serializeCookieMap(parseCookieHeader(sourceCookie || normalizedCookie)) ||
+			normalizedCookie,
+		sourceSapisid: String(sourceSapisid || ""),
 	};
 }
 
 function cookieSourceKey(cfg: RuntimeConfig): string {
 	const secure1psid = extractCookieValue(cfg.cookie, "__Secure-1PSID");
-	const secure1psidts = extractCookieValue(cfg.cookie, "__Secure-1PSIDTS");
-	const sapisid = String(
-		cfg.sapisid || extractCookieValue(cfg.cookie, "SAPISID") || "",
-	);
-	return `${secure1psid || cfg.cookie || ""}\x00${secure1psidts}\x00${sapisid}`;
+	return secure1psid || serializeCookieMap(parseCookieHeader(cfg.cookie)) || "";
+}
+
+function cookieRotationAttempt(
+	state: ActiveCookieState,
+	reason: CookieRotationReason,
+	updated = false,
+	credentialInvalidated = false,
+	upstreamStatus = 0,
+): CookieRotationAttempt {
+	setRotationReason(reason, upstreamStatus);
+	const attempt: CookieRotationAttempt = {
+		state,
+		updated,
+		credentialInvalidated,
+		reason,
+	};
+	if (upstreamStatus) attempt.upstreamStatus = upstreamStatus;
+	return attempt;
 }
 
 export function resetActiveGeminiCookieForTest(): void {
 	activeCookieState = null;
 	rotatePromise = null;
 	setRotationReason("missing_cookie");
+}
+
+function parseSetCookieMutation(
+	setCookie: unknown,
+	options: MergeSetCookieOptions,
+): { name: string; value: string; remove: boolean } | null {
+	const parts = String(setCookie || "")
+		.split(";")
+		.map((part) => part.trim());
+	const first = parts.shift() || "";
+	const eq = first.indexOf("=");
+	if (eq <= 0) return null;
+	const name = first.slice(0, eq).trim();
+	const value = first.slice(eq + 1).trim();
+	if (!name) return null;
+
+	let domain = "";
+	let path = "";
+	let secure = false;
+	let maxAge: number | null = null;
+	let expiresAtMs: number | null = null;
+	for (const part of parts) {
+		if (!part) continue;
+		const attrEq = part.indexOf("=");
+		const attrName = (attrEq < 0 ? part : part.slice(0, attrEq))
+			.trim()
+			.toLowerCase();
+		const attrValue =
+			attrEq < 0 ? "" : unquoteCookieAttribute(part.slice(attrEq + 1).trim());
+		if (attrName === "domain") domain = attrValue.toLowerCase();
+		else if (attrName === "path") path = attrValue;
+		else if (attrName === "secure") secure = true;
+		else if (attrName === "max-age" && /^-?\d+$/.test(attrValue))
+			maxAge = Number(attrValue);
+		else if (attrName === "expires") {
+			const parsed = Date.parse(attrValue);
+			if (Number.isFinite(parsed)) expiresAtMs = parsed;
+		}
+	}
+
+	if (options.responseUrl && options.targetUrl) {
+		let responseUrl: URL;
+		let targetUrl: URL;
+		try {
+			responseUrl = new URL(options.responseUrl);
+			targetUrl = new URL(options.targetUrl);
+		} catch (_) {
+			return null;
+		}
+		const responseHost = responseUrl.hostname.toLowerCase();
+		const targetHost = targetUrl.hostname.toLowerCase();
+		if (domain) {
+			domain = domain.replace(/^\.+/, "");
+			if (
+				!domain ||
+				!domainMatches(responseHost, domain) ||
+				!domainMatches(targetHost, domain)
+			)
+				return null;
+		} else if (responseHost !== targetHost) return null;
+
+		const cookiePath = path.startsWith("/")
+			? path
+			: defaultCookiePath(responseUrl.pathname);
+		if (!cookiePathMatches(targetUrl.pathname || "/", cookiePath)) return null;
+		if (
+			(secure &&
+				(responseUrl.protocol !== "https:" ||
+					targetUrl.protocol !== "https:")) ||
+			(name.startsWith("__Secure-") &&
+				(!secure || responseUrl.protocol !== "https:"))
+		)
+			return null;
+	}
+
+	const nowMs = Number.isFinite(options.nowMs)
+		? Number(options.nowMs)
+		: Date.now();
+	const remove =
+		maxAge !== null
+			? maxAge <= 0
+			: expiresAtMs !== null && expiresAtMs <= nowMs;
+	return { name, value, remove };
+}
+
+function unquoteCookieAttribute(value: string): string {
+	if (value.length >= 2 && value.startsWith('"') && value.endsWith('"'))
+		return value.slice(1, -1);
+	return value;
+}
+
+function domainMatches(host: string, domain: string): boolean {
+	return host === domain || host.endsWith(`.${domain}`);
+}
+
+function defaultCookiePath(pathname: string): string {
+	if (!pathname.startsWith("/") || pathname === "/") return "/";
+	const lastSlash = pathname.lastIndexOf("/");
+	return lastSlash <= 0 ? "/" : pathname.slice(0, lastSlash);
+}
+
+function cookiePathMatches(requestPath: string, cookiePath: string): boolean {
+	if (requestPath === cookiePath) return true;
+	if (!requestPath.startsWith(cookiePath)) return false;
+	return cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/";
 }
 
 function looksLikeCookiePair(raw: string, from: number): boolean {
@@ -473,13 +854,17 @@ function setRotationReason(
 
 function rotationRetryResult(
 	config: RuntimeConfig | null,
+	reason?: CookieRotationReason,
+	upstreamStatus?: number,
 ): CookieRotationRetryResult {
+	const resolvedReason = reason || lastRotationReason;
+	const resolvedStatus =
+		upstreamStatus || (reason === undefined ? lastRotationUpstreamStatus : 0);
 	const result: CookieRotationRetryResult = {
 		config,
-		reason: lastRotationReason,
+		reason: resolvedReason,
 	};
-	if (lastRotationUpstreamStatus)
-		result.upstreamStatus = lastRotationUpstreamStatus;
+	if (resolvedStatus) result.upstreamStatus = resolvedStatus;
 	return result;
 }
 

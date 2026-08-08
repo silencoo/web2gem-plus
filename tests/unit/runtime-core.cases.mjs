@@ -693,7 +693,7 @@ export const cases = [
 		},
 	],
 	[
-		"fences concurrent Gemini cookie rotations and commits only validated candidates",
+		"fences active Gemini cookie rotations and releases after durable commit",
 		async () => {
 			let stored;
 			const storage = {
@@ -745,6 +745,53 @@ export const cases = [
 			});
 			const afterStaleCommit = await call("/acquire", { seeds });
 			assert.match(afterStaleCommit.cookie, /__Secure-1PSIDTS=new/);
+		},
+	],
+	[
+		"cools a Gemini account when an unfinished rotation fence expires",
+		async () => {
+			const originalNow = Date.now;
+			let now = 1_700_000_000_000;
+			Date.now = () => now;
+			try {
+				let stored;
+				const storage = {
+					transaction: async (callback) => callback(storage),
+					get: async () => stored,
+					put: async (_key, value) => {
+						stored = structuredClone(value);
+					},
+				};
+				const pool = new mod.GeminiSessionPool({ storage });
+				const seeds = [
+					{
+						cookie: "__Secure-1PSID=one; __Secure-1PSIDTS=old",
+						sapisid: "",
+					},
+				];
+				const call = async (path, body) => {
+					const response = await pool.fetch(
+						new Request(`https://pool.test${path}`, {
+							method: "POST",
+							body: JSON.stringify(body),
+						}),
+					);
+					return response.json();
+				};
+
+				const lease = await call("/acquire", { seeds });
+				const begun = await call("/begin-rotation", { lease });
+				assert.equal(begun.status, "acquired");
+				now += 2 * 60 * 1000 + 1;
+
+				assert.equal(await call("/acquire", { seeds }), null);
+				const accounts = await call("/accounts", { seeds });
+				assert.equal(accounts[0].status, "cooling");
+				assert.equal(accounts[0].issue, "auth");
+				assert.equal(stored.accounts[lease.account_id].rotation_token, "");
+			} finally {
+				Date.now = originalNow;
+			}
 		},
 	],
 	[

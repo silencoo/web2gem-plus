@@ -197,9 +197,10 @@ export class GeminiSessionPool {
 				(await storage.get<PoolState>("pool")) || structuredClone(EMPTY_STATE);
 			const account = pool.accounts[lease.account_id];
 			const now = Date.now();
-			if (!account || account.disabled || account.cooldown_until_ms > now)
-				return { status: "unavailable" };
+			if (!account) return { status: "unavailable" };
 			clearStaleRotation(account, now);
+			if (account.disabled || account.cooldown_until_ms > now)
+				return { status: "unavailable" };
 			if (account.rotation_token) return { status: "busy" };
 			if (account.version !== lease.version)
 				return { status: "updated", lease: publicLease(account) };
@@ -226,13 +227,11 @@ export class GeminiSessionPool {
 			const account = pool.accounts[rotation.account_id];
 			if (!rotationMatches(account, rotation))
 				return account ? publicLease(account) : null;
-			if (cookie) {
-				account.cookie = cookie;
-				account.sapisid = sapisid;
-				account.version++;
-				account.last_cookie_refresh_at_ms = Date.now();
-				account.refresh_count++;
-			}
+			account.cookie = cookie;
+			account.sapisid = sapisid;
+			account.version++;
+			account.last_cookie_refresh_at_ms = Date.now();
+			account.refresh_count++;
 			clearRotation(account);
 			await storage.put("pool", pool);
 			return publicLease(account);
@@ -432,9 +431,10 @@ function createMemoryPool(seeds: GeminiCookieSeed[]): GeminiSessionPoolPort {
 		beginRotation: async (lease) => {
 			const account = memoryPoolState.accounts[lease.account_id];
 			const now = Date.now();
-			if (!account || account.disabled || account.cooldown_until_ms > now)
-				return { status: "unavailable" } as const;
+			if (!account) return { status: "unavailable" } as const;
 			clearStaleRotation(account, now);
+			if (account.disabled || account.cooldown_until_ms > now)
+				return { status: "unavailable" } as const;
 			if (account.rotation_token) return { status: "busy" } as const;
 			if (account.version !== lease.version)
 				return { status: "updated", lease: publicLease(account) } as const;
@@ -451,13 +451,11 @@ function createMemoryPool(seeds: GeminiCookieSeed[]): GeminiSessionPoolPort {
 			const account = memoryPoolState.accounts[rotation.account_id];
 			if (!rotationMatches(account, rotation))
 				return account ? publicLease(account) : null;
-			if (cookie) {
-				account.cookie = cookie;
-				account.sapisid = sapisid;
-				account.version++;
-				account.last_cookie_refresh_at_ms = Date.now();
-				account.refresh_count++;
-			}
+			account.cookie = cookie;
+			account.sapisid = sapisid;
+			account.version++;
+			account.last_cookie_refresh_at_ms = Date.now();
+			account.refresh_count++;
 			clearRotation(account);
 			return publicLease(account);
 		},
@@ -751,8 +749,11 @@ function clearStaleRotation(account: StoredAccount, now: number): void {
 		account.rotation_token &&
 		now - account.rotation_started_at_ms >= ROTATION_STALE_MS
 	) {
-		account.version++;
 		clearRotation(account);
+		// The external RotateCookies call may have succeeded before the Worker was
+		// interrupted. Never put the possibly invalid old cookie straight back into
+		// circulation when its persistence fence expires.
+		recordAccountFailure(account, "auth", now);
 	}
 }
 
